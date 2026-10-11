@@ -1,16 +1,18 @@
 {
   "name": "dsh-doorman",
-  "version": "0.1.0",
-  "description": "Unofficial DeepSeek Harness plugin that triages sandbox-escalation approvals. Stage 1: hard rules in observe-only mode; every prompt still reaches you.",
+  "version": "0.2.0",
+  "description": "Unofficial DeepSeek Harness plugin that triages sandbox-escalation approvals: hard rules plus a second-model review. Stage 2: observe-only; every prompt still reaches you.",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "index.js",
+    "client.js",
     "lib/**/*.js",
     "cordis.patch.yml",
     "locale/*.json",
@@ -28,6 +30,16 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
     }
   }
 }
