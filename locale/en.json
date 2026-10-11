@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-doorman (stage 0 probe)",
+    "description": "Records sandbox-escalation approvals and what you chose. Decides nothing; the approval prompt appears as usual."
+  }
+}

@@ -1,0 +1,24 @@
+# AI assistant notes stay local
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+
+# Build output
+*.tgz
+dist/
+
+# Dependencies (the plugin itself has none; this is for local tooling only)
+node_modules/
+
+# Runtime data must never enter the repository
+*.log
+*.jsonl
+allowlist*.json
+config.local.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

@@ -1,0 +1,32 @@
+{
+  "name": "dsh-doorman",
+  "version": "0.0.1",
+  "description": "Stage-0 probe for dsh-doorman: records sandbox-escalation approvals and what the user chose. It never decides anything.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "icon": "./icon.svg",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "dsh": "0.2.0-rc.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
