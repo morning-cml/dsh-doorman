@@ -1,7 +1,7 @@
 {
   "name": "dsh-doorman",
-  "version": "0.0.1",
-  "description": "Stage-0 probe for dsh-doorman: records sandbox-escalation approvals and what the user chose. It never decides anything.",
+  "version": "0.1.0",
+  "description": "Unofficial DeepSeek Harness plugin that triages sandbox-escalation approvals. Stage 1: hard rules in observe-only mode; every prompt still reaches you.",
   "type": "module",
   "main": "index.js",
   "exports": {
@@ -11,6 +11,7 @@
   },
   "files": [
     "index.js",
+    "lib/**/*.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"
