@@ -202,6 +202,32 @@ test('the previous failed attempt is attached, even without dsh\'s sandbox marke
   assert.match(reviewer.calls[0].payload.previous_failed_attempt.output_tail, /%USERPROFILE%\\Desktop/)
 })
 
+const foreground = (exitCode, stdout, stderr = '') => ({ isError: false, content: [{ type: 'text', text: `${stdout}\n${stderr}` }], value: { kind: 'foreground', exitCode, timedOut: false, aborted: false, signal: null, stdout: { text: stdout }, stderr: { text: stderr } } })
+
+test('a refusal the command caught itself (exit 0) still counts as the previous failure', async () => {
+  const reviewer = deferredReviewer()
+  const { runtime, log } = makeRuntime({ reviewImpl: reviewer.impl })
+  const target = 'C:\\Users\\alice\\Desktop\\out\\old.txt'
+  runtime.onPreExecute({ callId: 'g1', name: 'pwsh', arguments: { command: `try { Remove-Item -LiteralPath '${target}' -Force -ErrorAction Stop } catch { "RESULT : FAILED - $($_.Exception.Message)" }` }, agent })
+  runtime.onResult({ callId: 'g1' }, foreground(0, `RESULT : FAILED - 对路径“${target}”的访问被拒绝。`))
+  await escalate(runtime, { callId: 'g2', args: { command: `Remove-Item -LiteralPath '${target}' -Force`, sandbox_permissions: 'danger-full-access', justification: 'delete one file' } })
+  const request = log.lines.find(l => l.event === 'request')
+  assert.equal(request.previousFailure.sameCommand, false)
+  assert.equal(request.previousFailure.accessDenied, true)
+  assert.match(reviewer.calls[0].payload.previous_failed_attempt.output_tail, /访问被拒绝/)
+})
+
+test('an unrelated earlier failure is not attached as context', async () => {
+  const reviewer = deferredReviewer()
+  const { runtime, log } = makeRuntime({ reviewImpl: reviewer.impl })
+  runtime.onPreExecute({ callId: 'u1', name: 'pwsh', arguments: { command: "Set-Content 'C:\\Users\\alice\\Desktop\\out\\other.txt' x" }, agent })
+  runtime.onResult({ callId: 'u1' }, foreground(1, '', "Set-Content : Access to the path 'C:\\Users\\alice\\Desktop\\out\\other.txt' is denied."))
+  await escalate(runtime, { callId: 'u2', args: { command: "Set-Content 'D:\\data\\new.txt' y", sandbox_permissions: 'danger-full-access', justification: 'write data' } })
+  const request = log.lines.find(l => l.event === 'request')
+  assert.equal(request.previousFailure, undefined)
+  assert.equal(reviewer.calls[0].payload.previous_failed_attempt, null)
+})
+
 test('the result of an escalated call is logged against its request', async () => {
   const { runtime, log } = makeRuntime()
   await escalate(runtime, { callId: 'r1', args: harmless })

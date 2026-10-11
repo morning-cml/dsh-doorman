@@ -1,6 +1,6 @@
 {
   "name": "dsh-doorman",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Unofficial DeepSeek Harness plugin that triages sandbox-escalation approvals: hard rules plus a second-model review. Stage 2: observe-only; every prompt still reaches you.",
   "type": "module",
   "main": "index.js",
