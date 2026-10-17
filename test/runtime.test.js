@@ -238,6 +238,46 @@ test('the result of an escalated call is logged against its request', async () =
   assert.equal(result.exitCode, 0)
 })
 
+test('the result says where the command really ran (dsh 0.2.1+) and whether the rules assumed the same place', async () => {
+  const { runtime, log } = makeRuntime()
+  await escalate(runtime, { callId: 'w1', args: harmless })
+  runtime.onResult({ callId: 'w1' }, { isError: false, content: [], value: { kind: 'foreground', cwd: WS.toUpperCase(), exitCode: 0, timedOut: false, aborted: false, signal: null, stdout: { text: '' }, stderr: { text: '' } } })
+  await escalate(runtime, { callId: 'w2', args: { ...harmless, workdir: 'scripts' } })
+  runtime.onResult({ callId: 'w2' }, { isError: false, content: [], value: { kind: 'foreground', cwd: WS, exitCode: 0, timedOut: false, aborted: false, signal: null, stdout: { text: '' }, stderr: { text: '' } } })
+  const [first, second] = log.lines.filter(l => l.event === 'result')
+  assert.equal(first.ranIn, WS.toUpperCase())
+  assert.equal(first.workdirMatches, true)
+  assert.equal(second.workdirMatches, false)
+})
+
+test('a command that went to the background is logged with its job and no exit code', async () => {
+  const { runtime, log } = makeRuntime()
+  await escalate(runtime, { callId: 'b1', args: harmless })
+  runtime.onResult({ callId: 'b1' }, { isError: false, content: [{ type: 'text', text: 'started background job pwsh-47' }], value: { kind: 'background', jobId: 'pwsh-47', cwd: WS } })
+  await escalate(runtime, { callId: 'b2', args: harmless })
+  runtime.onResult({ callId: 'b2' }, { isError: false, content: [{ type: 'text', text: 'still running' }], value: { kind: 'promoted', jobId: 'pwsh-48', cwd: WS, timeoutMs: 120000, output: 'still running' } })
+  const [background, promoted] = log.lines.filter(l => l.event === 'result')
+  assert.deepEqual([background.kind, background.jobId, background.exitCode], ['background', 'pwsh-47', undefined])
+  assert.deepEqual([promoted.kind, promoted.jobId], ['promoted', 'pwsh-48'])
+})
+
+test('a run_code sub-dispatch is recognised as nested by its root call id too', async () => {
+  const { runtime, log } = makeRuntime()
+  runtime.onPreExecute({ callId: 'sub1', rootCallId: 'root1', name: 'pwsh', arguments: harmless, agent })
+  await runtime.onApproval({ agent, toolName: 'pwsh', callId: 'sub1', reason: `escalate sandbox to danger-full-access: ${harmless.justification}` }, async () => 'rejected')
+  runtime.onPreExecute({ callId: 'top1', rootCallId: 'top1', name: 'pwsh', arguments: harmless, agent })
+  await runtime.onApproval({ agent, toolName: 'pwsh', callId: 'top1', reason: `escalate sandbox to danger-full-access: ${harmless.justification}` }, async () => 'rejected')
+  assert.deepEqual(log.lines.filter(l => l.event === 'request').map(l => l.scope), ['nested', 'ok'])
+})
+
+test('a script run through Invoke-Expression reaches the reviewer with its text', async () => {
+  const reviewer = deferredReviewer()
+  const script = `${WS}\\scripts\\build.ps1`
+  const { runtime } = makeRuntime({ reviewImpl: reviewer.impl, readText: f => (f === script ? 'Write-Output "building"' : undefined) })
+  await escalate(runtime, { args: { command: 'Invoke-Expression (Get-Content -Raw -LiteralPath .\\scripts\\build.ps1)', sandbox_permissions: 'danger-full-access', justification: 'build' } })
+  assert.deepEqual(reviewer.calls[0].payload.scripts, [{ path: '<WORKSPACE>\\scripts\\build.ps1', content: 'Write-Output "building"' }])
+})
+
 test('mode off: nothing is evaluated or logged, requests pass through', async () => {
   const { runtime, log } = makeRuntime({ mode: 'off' })
   assert.equal(await escalate(runtime, { args: deleteDocs, answer: 'rejected' }), 'rejected')

@@ -13,7 +13,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { detectDshVersion, findDshHome, installFacts, realProbe } from './lib/dsh-env.js'
+import { VERIFIED_DSH_VERSIONS, detectDshVersion, findDshHome, installFacts, realProbe } from './lib/dsh-env.js'
 import { createHost } from './lib/host.js'
 import { createLog } from './lib/log.js'
 import { createRuntime } from './lib/runtime.js'
@@ -135,12 +135,14 @@ export function apply(ctx, config) {
     }
 
     const dshVersion = detectDshVersion(specifier => import.meta.resolve(specifier))
+    const dshVersionVerified = dshVersion !== null && VERIFIED_DSH_VERSIONS.includes(dshVersion)
     const version = recordVersion(stateFile, dshVersion)
     if (version.changed) {
       log.write('dsh-version-changed', {
         from: version.previous,
         to: version.current,
-        note: '!!! dsh 版本变了。自动模式会退回只观察，直到确认新版本（把插件设置里的 autoModeConfirmedForVersion 改成新版本号）。',
+        verifiedByPlugin: dshVersionVerified,
+        note: `!!! dsh 版本变了${dshVersionVerified ? '（插件已对照这个版本的源码核实过）' : '，插件还没对照这个版本的源码核实过'}。自动模式会退回只观察，直到确认新版本（把插件设置里的 autoModeConfirmedForVersion 改成新版本号）。`,
       })
     }
 
@@ -183,6 +185,7 @@ export function apply(ctx, config) {
     log.write('startup', {
       pluginVersion,
       dshVersion,
+      dshVersionVerified,
       platform: process.platform,
       dshHome,
       dshHomeSource: source,

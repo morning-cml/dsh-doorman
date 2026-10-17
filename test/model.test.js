@@ -148,6 +148,16 @@ test('personal path prefixes become placeholders', () => {
   assert.equal(sub("Set-Content 'C:\\Users\\alice\\proj'"), "Set-Content '<WORKSPACE>'")
 })
 
+test('dsh\'s own folders get their own placeholders, so the reviewer can tell them apart', () => {
+  const node = 'C:\\Users\\alice\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\runtime\\primary-runtime\\dependencies\\node\\bin\\node.exe'
+  const built = shellPayload(`& "C:\\Users\\alice\\.dsh\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\python\\python.exe" -m pip list; & "${node}" --version`)
+  assert.equal(built.ok, true)
+  assert.match(built.payload.command, /^& "<DSH_HOME>\\dsh-runtimes\\dsh-primary-runtime\\dependencies\\python\\python\.exe" -m pip list; & "<DSH_APP>\\resources\\runtime\\/)
+  assert.equal(JSON.stringify(built.payload).toLowerCase().includes('alice'), false)
+  assert.match(SYSTEM_PROMPT, /<DSH_HOME>/)
+  assert.match(SYSTEM_PROMPT, /<DSH_APP>/)
+})
+
 /** Hard-rule facts plus payload for a shell command in the fake workspace. */
 function shellPayload(command, { readText = () => undefined, previousFailure, justification = '需要写到工作区外' } = {}) {
   const args = { command, sandbox_permissions: 'danger-full-access', justification }
@@ -178,6 +188,12 @@ test('payload: scripts the command runs are included; unreadable, binary or over
   assert.equal(shellPayload('& .\\scripts\\build.ps1', { readText: () => 'x'.repeat(8001) }).ok, false)
   assert.equal(shellPayload('.\\bin\\tool.exe --install').ok, false)
   assert.equal(shellPayload(`echo ${'x'.repeat(8100)}`).ok, false)
+  // A script run twice is sent once; a file run through iex is sent whatever its extension.
+  const twice = shellPayload('& .\\scripts\\build.ps1; & .\\scripts\\build.ps1 -Release', { readText: f => (f === script ? 'x' : undefined) })
+  assert.equal(twice.payload.scripts.length, 1)
+  const notes = 'C:\\Users\\alice\\proj\\notes.txt'
+  const iex = shellPayload('iex (Get-Content .\\notes.txt -Raw)', { readText: f => (f === notes ? 'Get-Date' : undefined) })
+  assert.deepEqual(iex.payload.scripts, [{ path: '<WORKSPACE>\\notes.txt', content: 'Get-Date' }])
 })
 
 test('payload: npm scripts come from package.json', () => {

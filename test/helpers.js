@@ -22,6 +22,8 @@ const EXISTING = [
 const LINKS = {
   'C:\\Users\\alice\\proj\\link': 'C:\\Users\\alice\\Documents',
   'C:\\Users\\alice\\proj\\dshlink': 'C:\\Users\\alice\\.dsh',
+  // A junction inside dsh's runtime folder that leads back into the profiles.
+  'C:\\Users\\alice\\.dsh\\dsh-runtimes\\evil': 'C:\\Users\\alice\\.dsh\\profiles',
   'C:\\Users\\ALICE~1': 'C:\\Users\\alice',
 }
 
