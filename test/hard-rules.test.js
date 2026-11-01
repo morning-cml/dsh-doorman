@@ -98,6 +98,21 @@ table('recursive delete outside the workspace is denied, however it is spelled',
   ["Remove-Item -Recurse ('C:\\Users\\alice\\' + 'Documents')", 'deny', 'deny.recursive-delete-outside'],
 ])
 
+table('aliases, functions and parameter defaults changed behind the analysis\'s back go to the user', [
+  ['New-Item alias:\\ls -Value Remove-Item; ls C:\\Users\\alice\\Documents -Recurse', 'ask', 'ask.too-complex'],
+  ['Set-Item alias:\\ls Remove-Item; ls C:\\Users\\alice\\Documents -Recurse', 'ask', 'ask.too-complex'],
+  ['Rename-Item alias:\\ri ls; ls C:\\Users\\alice\\Documents -Recurse', 'ask', 'ask.too-complex'],
+  ['Copy-Item alias:\\ri alias:\\ls; ls C:\\Users\\alice\\Documents -Recurse', 'ask', 'ask.too-complex'],
+  ['New-Item -Path Function:\\Get-ChildItem -Value { 1 }', 'ask', 'ask.too-complex'],
+  ["$PSDefaultParameterValues = @{'Remove-Item:Recurse' = $true}; Remove-Item C:\\Users\\alice\\Documents", 'ask', 'ask.too-complex'],
+  ["$PSDefaultParameterValues['Remove-Item:Recurse'] = $true; Remove-Item C:\\Users\\alice\\Documents", 'ask', 'ask.too-complex'],
+  ["$global:PSDefaultParameterValues.Add('Remove-Item:Recurse', $true)", 'ask', 'ask.too-complex'],
+  ["Set-Variable -Name ('PSDefault' + 'ParameterValues') -Value @{}", 'ask', 'ask.too-complex'],
+  // Still followed, still denied; environment variables are not part of this.
+  ['Set-Alias ls Remove-Item; ls C:\\Users\\alice\\Documents -Recurse', 'deny', 'deny.recursive-delete-outside'],
+  ['$env:FOO = 1; npm install', 'pass'],
+])
+
 table('harder spellings: splatting, here-strings, computed names, COM objects', [
   ["$a = @{ Path = 'C:\\Users\\alice\\Documents'; Recurse = $true }; Remove-Item @a", 'ask', 'ask.unknown-delete-target'],
   ["iex @'\nRemove-Item -Recurse C:\\Users\\alice\\Documents\n'@", 'deny', 'deny.recursive-delete-outside'],
