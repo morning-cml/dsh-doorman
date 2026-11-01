@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { evaluateHardRules } from '../lib/rules/hard-rules.js'
-import { WS, host, posixHost } from './helpers.js'
+import { PLUGIN_SKILLS, WS, host, posixHost } from './helpers.js'
 
 const pwsh = (command, extra = {}) => evaluateHardRules({ tool: 'pwsh', args: { command, ...extra }, host, workspaceRoot: WS, cwd: WS })
 const bash = command => evaluateHardRules({ tool: 'bash', args: { command }, host: posixHost, workspaceRoot: '/home/bob/proj', cwd: '/home/bob/proj' })
@@ -243,6 +243,63 @@ table('…but never changed, and nothing else of dsh borrows that allowance', [
   [`& "${NODE}" x.js; Get-Content C:\\Users\\alice\\.dsh\\.credentials.yaml`, 'deny', 'deny.protected'],
   [`Get-ChildItem "${RT}"`, 'deny', 'deny.protected'],
   [`& "${NODE}" x.js; Stop-Process -Name "DeepSeek Harness"`, 'deny', 'deny.kill-dsh'],
+])
+
+// Another installed plugin's skill scripts: dsh runs these the way it runs its own bundled tools.
+const SKILL = `${PLUGIN_SKILLS}\\diagram\\bin\\run.mjs`
+table('an installed plugin\'s skill scripts may be run, never changed', [
+  [`& "${NODE}" "${SKILL}" --input a.json --out b.html`],
+  [`& "${SKILL}" render`],
+  [`$node="${NODE}"; $skill='${PLUGIN_SKILLS}\\diagram'; & $node (Join-Path $skill 'bin\\run.mjs') finalize .\\candidate.json`],
+].map(([c]) => [c, 'pass']))
+
+table('…but changing an installed plugin, or running this plugin\'s own code, is still denied', [
+  [`Set-Content "${SKILL}" 'evil'`, 'deny', 'deny.protected'],
+  [`Remove-Item -Recurse "${PLUGIN_SKILLS}"`, 'deny', 'deny.protected'],
+  [`Copy-Item .\\evil.mjs "${SKILL}"`, 'deny', 'deny.protected'],
+  // dsh-doorman is excluded from the carve-out: its own files are never runnable.
+  ['& "C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules\\dsh-doorman\\index.js"', 'deny', 'deny.protected'],
+])
+
+table('PowerShell flow-control keywords glued to their condition are parsed, not treated as commands', [
+  ['if(Test-Path x){ Remove-Item -Recurse ..\\other }', 'deny', 'deny.recursive-delete-outside'],
+  ['foreach($i in 1..3){ Remove-Item -Recurse C:\\Users\\alice\\Documents }', 'deny', 'deny.recursive-delete-outside'],
+  ['while($true){ Set-Content C:\\Users\\alice\\.dsh\\x y }', 'deny', 'deny.protected'],
+  ['switch($x){ default { npm install } }', 'pass'],
+  // The move case that used to be a spurious "too complex": moving a file into the workspace.
+  ["$src='C:\\Users\\alice\\Desktop\\out\\old.txt'; if(Test-Path $src){ Move-Item -LiteralPath $src -Destination .\\a.txt }", 'pass'],
+])
+
+test('glued if(...) no longer raises a spurious ask.too-complex', () => {
+  const r = pwsh("$src='C:\\Users\\alice\\Downloads\\a.pdf'; if(Test-Path $src){ Move-Item -LiteralPath $src -Destination .\\a.pdf }")
+  assert.equal(r.verdict, 'pass')
+  assert.equal(r.findings.some(f => f.rule === 'ask.too-complex'), false)
+})
+
+table('git push: a plain push passes; rewriting or redirecting it is handed to the user', [
+  ['git push', 'pass'],
+  ['git push origin main', 'pass'],
+  ['git push -u origin main', 'pass'],
+  ['git -c core.quotepath=false push origin main', 'pass'],
+  ['git -c core.quotepath=false push --force origin main', 'ask', 'ask.force-push'],
+  ['git -C C:\\Users\\alice\\proj push --mirror backup', 'ask', 'ask.force-push'],
+  ['git push --force origin main', 'ask', 'ask.force-push'],
+  ['git push -f', 'ask', 'ask.force-push'],
+  ['git push --force-with-lease origin main', 'ask', 'ask.force-push'],
+  ['git push --mirror backup', 'ask', 'ask.force-push'],
+  ['git push origin --delete feature', 'ask', 'ask.force-push'],
+  ['git push origin +main:main', 'ask', 'ask.force-push'],
+  ['git push https://ex.example/x.git main', 'ask', 'ask.force-push'],
+  ['git push git@github.com:x/y.git main', 'ask', 'ask.force-push'],
+])
+
+table('$profile as an agent variable is not mistaken for the PowerShell profile', [
+  // The regression: a Chrome --user-data-dir called $profile is just a workspace folder.
+  ["$profile='C:\\Users\\alice\\proj\\tests\\chrome-profile'; New-Item -ItemType Directory -Force -Path $profile", 'pass'],
+  ['$profile = ".\\out\\p"; Set-Content $profile\\log.txt hi', 'pass'],
+  // Real profile writes are still caught, now through the resolved profile.ps1 path.
+  ["Add-Content $PROFILE 'Set-Alias ll ls'", 'ask', 'ask.shell-profile'],
+  ['"Set-Alias ll ls" | Out-File $PROFILE', 'ask', 'ask.shell-profile'],
 ])
 
 table('the user\'s global instructions and skills always go to the user', [

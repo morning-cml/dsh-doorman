@@ -12,6 +12,10 @@ const EXISTING = [
   'C:\\Users\\alice\\.dsh', 'C:\\Users\\alice\\.dsh\\.credentials.yaml', 'C:\\Users\\alice\\.dsh\\dsh-doorman', 'C:\\Users\\alice\\.dsh\\dsh-doorman\\allowlist.json',
   'C:\\Users\\alice\\.dsh\\profiles', 'C:\\Users\\alice\\.dsh\\profiles\\desktop', 'C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules',
   'C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules\\dsh-doorman', 'C:\\Users\\alice\\.ssh', 'C:\\Users\\alice\\.npmrc',
+  // Another installed plugin that ships a skill the agent runs (see PLUGIN_SKILLS below).
+  'C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules\\@acme\\diagram-dsh',
+  'C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules\\@acme\\diagram-dsh\\skills',
+  'C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules\\@acme\\diagram-dsh\\skills\\diagram\\bin\\run.mjs',
   'C:\\Users\\alice\\AppData', 'C:\\Users\\alice\\AppData\\Local', 'C:\\Users\\alice\\AppData\\Local\\Temp', 'C:\\Users\\alice\\AppData\\Roaming',
   'C:\\Users\\alice\\AppData\\Local\\npm-cache', 'C:\\Users\\alice\\AppData\\Local\\Programs', 'C:\\Users\\alice\\AppData\\Local\\Programs\\DeepSeek Harness',
   'C:\\Users\\alice\\AppData\\Roaming\\@deepseek-ai', 'C:\\Users\\alice\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup',
@@ -57,6 +61,9 @@ export const ENV = {
 
 export const WS = 'C:\\Users\\alice\\proj'
 
+/** The skills directory of another installed plugin: its scripts may be run, never changed. */
+export const PLUGIN_SKILLS = 'C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules\\@acme\\diagram-dsh\\skills'
+
 export const host = createHost({
   platform: 'win32',
   home: 'C:\\Users\\alice',
@@ -66,6 +73,7 @@ export const host = createHost({
   installDir: 'C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules\\dsh-doorman',
   execPath: 'C:\\Users\\alice\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe',
   tempDirs: ['C:\\Users\\alice\\AppData\\Local\\Temp'],
+  pluginSkillDirs: [PLUGIN_SKILLS],
   probe: {
     realpath,
     exists: p => realpath(p) !== undefined,

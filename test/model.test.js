@@ -146,6 +146,9 @@ test('personal path prefixes become placeholders', () => {
   assert.equal(sub('del C:\\Users\\alice\\AppData\\Local\\Temp\\x'), 'del %TEMP%\\x')
   assert.equal(sub('dir C:\\Users\\alice2\\x'), 'dir C:\\Users\\alice2\\x')
   assert.equal(sub("Set-Content 'C:\\Users\\alice\\proj'"), "Set-Content '<WORKSPACE>'")
+  // A path embedded in JSON doubles its backslashes; it must still be replaced, or it leaks.
+  assert.equal(sub('{"path":"C:\\\\Users\\\\alice\\\\proj\\\\out.html"}'), '{"path":"<WORKSPACE>\\\\out.html"}')
+  assert.equal(sub('spec C:\\\\Users\\\\alice\\\\Documents\\\\x').includes('alice'), false)
 })
 
 test('dsh\'s own folders get their own placeholders, so the reviewer can tell them apart', () => {

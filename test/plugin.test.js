@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { createLog } from '../lib/log.js'
+import { installedPluginSkillDirs } from '../lib/dsh-env.js'
 import { buildConfigSchema, readSettings } from '../lib/settings.js'
 import { readState, recordVersion } from '../lib/state.js'
 
@@ -141,6 +142,21 @@ test('settings: only the model fields are live-editable; the mode needs a file e
   const editable = Object.entries(marks).filter(([, node]) => node.volatileFlag).map(([key]) => key).sort()
   assert.deepEqual(editable, ['baseUrl', 'maxCallsPerHour', 'model', 'timeoutSeconds'])
   assert.equal(buildConfigSchema(undefined), undefined)
+})
+
+test('installedPluginSkillDirs finds other plugins\' skills and skips this plugin', () => {
+  const nm = path.join(home, 'nm-test', 'node_modules')
+  for (const dir of [
+    'dsh-doorman/skills', // this plugin: skipped even if it somehow has one
+    '@acme/diagram-dsh/skills/diagram/bin',
+    'plain-plugin/skills',
+    'no-skills-plugin/lib',
+    '.bin', '.pnpm/registry',
+  ]) fs.mkdirSync(path.join(nm, dir), { recursive: true })
+  const found = installedPluginSkillDirs(path.join(nm, 'dsh-doorman')).map(p => path.relative(nm, p).replace(/\\/g, '/')).sort()
+  assert.deepEqual(found, ['@acme/diagram-dsh/skills', 'plain-plugin/skills'])
+  // A package directory that is not inside node_modules yields nothing, never throws.
+  assert.deepEqual(installedPluginSkillDirs(path.join(home, 'nowhere', 'dsh-doorman')), [])
 })
 
 test('state: a dsh version change is reported once', () => {

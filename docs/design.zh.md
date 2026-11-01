@@ -365,3 +365,43 @@ profile 里记录的是压缩包的绝对路径，所以**插件装着的时候�
 - 用 dsh 自带的 pip 往自带 Python 里装包（`python.exe -m pip install …`）会改动 dsh 的运行环境，规则看不出来，交给千问判断
   （dsh 本身允许用户往自带环境里加包）。
 - 被运行的脚本本身做什么，规则仍然看不到（和以前一样，靠千问读脚本内容）。
+
+## 14. 2026-11-01：适配 dsh 0.2.1-rc.3…rc.5，并按 10-17 之后两周的使用记录调整（插件 0.2.3）
+
+### dsh 版本
+
+- 10-24 自动更新到 **0.2.1-rc.3**、11-01 到 **0.2.1-rc.5**（中间还有 rc.4）。对照源码：插件用到的每一个包（审批、提权、
+  沙箱策略、会话目录、凭据、shell 工具、设置页、插件管理）从 rc.2 到 rc.5 **只改了版本号**；整条线里唯一的代码改动是
+  `ui-plugin-manager` 多了一个 `openList()` 导航方法，和插件无关。所以 rc.3/rc.4/rc.5 一并加入 `VERIFIED_DSH_VERSIONS`。
+- **0.2.2 暂不核实**：它重写了审批服务（`user-approval` 改用 session projection 记录 policy/turn，提权的 `displayReason`
+  改从 `sandbox/locales` 生成）。等它进入桌面端、确定接口后再单独复核。
+
+### 这两周（10-17…10-29，共 154 次在管辖范围内、全部弹给了你）的记录与调整
+
+| 当时判断 | 次数 | 说明 |
+|---|---|---|
+| 送千问 | ~55 | 其中 git push 约 25 次，千问每次都 ask_user，你每次都允许 |
+| 硬性规则直接拒绝 | 11 | 9 次是 archify 用自带 node 跑 `skills\…\bin\archify.mjs`（你都允许了）；2 次是改 profile 的 cordis.patch.yml（应当拒绝） |
+| 硬性规则弹给你 | 9 | 含 3 次把 `$profile`（Chrome 的 --user-data-dir 变量）误当成 PowerShell `$PROFILE`，2 次 `if(…){…}` 搬文件被当成“太绕” |
+| 模型送审失败（看不到内容） | ~71 | 工作区里的 `bsk.exe` 等程序，规则看不到内容——按你的意思保持弹给你 |
+
+1. **运行已安装插件 skills 目录里的脚本，算正常用法**：`<DSH_HOME>\profiles\…\node_modules\<插件>\skills` 下的脚本，和 dsh
+   自带运行环境一样，只放过“运行”，往里写入/删除/移动照旧直接拒绝。**本插件 dsh-doorman 自己的目录不在此列**（代码里按包名排除，
+   而且它本来就没有 skills 目录）。插件 skills 目录由启动时扫描 profile 的 node_modules 得到（读不到就当没有，规则照旧从严）。
+2. **`$var`+`Join-Path` 拼出来的路径，带上它用到的变量赋值一起脱敏**：这样像 `$skill='…\skills\archify'; & $node (Join-Path
+   $skill 'bin\archify.mjs')` 这种分步拼接，`$skill` 赋值行里的 `.dsh` 也能从关键词兜底扫描里正确去掉，不会再被误拒。
+3. **`if(…){…}`、`foreach(…){…}` 这类紧贴括号的流程关键字，按流程控制解析**（以前带空格的 `if (…)` 没事，紧贴的 `if(` 会被
+   当成“算出来的命令名+删除字样”误报“太绕”）。条件和代码块照常递归分析，里面真有越界删除仍然拦得住。
+4. **`$profile` 不再按关键词误报**：它既可能是 PowerShell 的 `$PROFILE`，也常是 agent 自己的变量。真正写 PowerShell 配置文件
+   会解析出 `…profile.ps1` 路径，由结构分析按 shell 启动文件拦截（`Add-Content $PROFILE`、`… | Out-File $PROFILE` 都仍然弹给你）。
+5. **git push 分两种**：推送到已配置好的远端（`git push`、`git push origin main` 等）交给千问，并在提示词里说明这是正常的开发收尾；
+   `--force`/`-f`/`--force-with-lease`/`--mirror`、删除远端分支（`--delete`/`+refspec`）、推送到命令里直接写出的地址 →
+   硬性规则直接弹给你（新 `ask.force-push`），永远不会自动放行。
+6. **修掉一个一直存在的脱敏漏洞**：命令输出里若嵌着 JSON（如 archify 的结果），里面的 Windows 路径是 `\\` 双反斜杠写法，
+   旧的路径替换只认单反斜杠，会把你的真实工作区/用户目录原样发给千问。现在双反斜杠写法也会被替换。重放这两周的 55 条送审记录，
+   发给千问的内容里 **0 条**再含真实用户路径。
+
+### 用两周记录离线重放（当前代码）的结果
+
+- 9 次 archify：直接拒绝 → 送千问；3 次 `$profile`、2 次搬文件：弹给你 → 送千问；2 次改 cordis.patch.yml：仍然直接拒绝；
+  2 次改 AGENTS.md、2 次删不确定目标：仍然弹给你。其余不变。

@@ -13,7 +13,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { VERIFIED_DSH_VERSIONS, detectDshVersion, findDshHome, installFacts, realProbe } from './lib/dsh-env.js'
+import { VERIFIED_DSH_VERSIONS, detectDshVersion, findDshHome, installFacts, installedPluginSkillDirs, realProbe } from './lib/dsh-env.js'
 import { createHost } from './lib/host.js'
 import { createLog } from './lib/log.js'
 import { createRuntime } from './lib/runtime.js'
@@ -155,6 +155,7 @@ export function apply(ctx, config) {
       installDir: packageDir,
       execPath: process.execPath,
       tempDirs: [os.tmpdir()],
+      pluginSkillDirs: installedPluginSkillDirs(packageDir),
       probe: realProbe,
     })
     const getKey = async (keyName) => {
