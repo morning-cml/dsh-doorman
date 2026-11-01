@@ -1,9 +1,16 @@
 // Runtime: observe-only behaviour around dsh's events, with a fake event bus and a fake reviewer.
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { createHost } from '../lib/host.js'
 import { createRuntime } from '../lib/runtime.js'
 import { readSettings } from '../lib/settings.js'
-import { WS, host } from './helpers.js'
+import { createAllowlist } from '../lib/store/allowlist.js'
+import { fingerprintOf } from '../lib/store/fingerprint.js'
+import { ENV, WS, host } from './helpers.js'
 
 /** Collects log lines in memory. */
 function memoryLog() {
@@ -20,12 +27,12 @@ function deferredReviewer(result = { status: 'ok', decision: 'allow', risk: 'low
   return { impl, calls, release: () => release() }
 }
 
-function makeRuntime({ mode = 'observe', confirmed = '', version = '0.2.0-rc.2', session, autoAvailable = false, reviewImpl, readText = () => undefined, getSettings } = {}) {
+function makeRuntime({ mode = 'observe', confirmed = '', version = '0.2.0-rc.2', session, autoAvailable = false, reviewImpl, readText = () => undefined, getSettings, allowlist, fingerprint, onHost = host } = {}) {
   const log = memoryLog()
   const settings = { ...readSettings({}).settings, mode, autoModeConfirmedForVersion: confirmed }
   const reviewer = reviewImpl ?? (async () => ({ status: 'ok', decision: 'allow', risk: 'low', explanation: 'x' }))
   const runtime = createRuntime({
-    host,
+    host: onHost,
     getSettings: getSettings ?? (() => settings),
     log,
     dshVersion: version,
@@ -35,6 +42,8 @@ function makeRuntime({ mode = 'observe', confirmed = '', version = '0.2.0-rc.2',
     readText,
     osLabel: 'Windows 11, Windows PowerShell 5.1',
     reviewImpl: reviewer,
+    allowlist,
+    fingerprint,
   })
   return { runtime, log }
 }
@@ -313,4 +322,190 @@ test('the connection check uses a fixed harmless request and logs the result', a
   const line = log.lines.find(l => l.event === 'model-selftest')
   assert.equal(line.trigger, 'key-changed')
   assert.equal(line.status, 'ok')
+})
+
+// ---------------------------------------------------------------- layer 2 (allowlist, shadow) and the post-check
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'doorman-runtime-test-'))
+after(() => fs.rmSync(tmp, { recursive: true, force: true }))
+let lists = 0
+
+/** Project files in the alice workspace, as the fingerprint and the payload read them. */
+const projectFiles = new Map([
+  [`${WS}\\package.json`.toLowerCase(), JSON.stringify({ scripts: { test: 'node --test' } })],
+  [`${WS}\\package-lock.json`.toLowerCase(), '{"lockfileVersion":3}'],
+])
+const readProject = f => projectFiles.get(f.toLowerCase())
+const hashProject = (f) => {
+  const text = readProject(f)
+  return text === undefined ? { missing: true } : { sha256: createHash('sha256').update(text).digest('hex') }
+}
+
+/** A runtime with a shadow allowlist (its file never exists). */
+function withAllowlist(options = {}) {
+  const onHost = options.onHost ?? host
+  const file = path.join(tmp, `list-${lists += 1}`, 'allowlist.json')
+  const allowlist = createAllowlist({ file, pathKey: p => onHost.tools.key(p), shadow: true })
+  const fingerprint = input => fingerprintOf({ ...input, host: onHost, hashFile: hashProject, readText: readProject })
+  return { ...makeRuntime({ ...options, allowlist, fingerprint, readText: readProject }), file }
+}
+
+function countingReviewer(result = { status: 'ok', decision: 'allow', risk: 'low', explanation: '按 package.json 安装依赖', model: 'qwen3.7-plus' }) {
+  const calls = []
+  return { calls, impl: async (input) => { calls.push(input); return result } }
+}
+
+const clean = (stdout = 'ok') => foreground(0, stdout)
+const rejected = { isError: true, error: { message: 'the user rejected escalating this command to "danger-full-access"' }, content: [] }
+
+test('allowlist (shadow): a clean, model-approved command would be added, and the same command then hits without a model call', async () => {
+  const reviewer = countingReviewer()
+  const { runtime, log, file } = withAllowlist({ reviewImpl: reviewer.impl })
+  await escalate(runtime, { callId: 'a1', args: harmless })
+  await settle()
+  runtime.onResult({ callId: 'a1' }, clean('added 1 package'))
+  const first = log.lines.find(l => l.event === 'request')
+  assert.equal(first.layer, 'model')
+  assert.equal(first.allowlist.lookup, 'miss')
+  assert.equal(first.allowlist.eligible, true)
+  assert.match(first.commandKey, /^[0-9a-f]{16}$/)
+  const added = log.lines.find(l => l.event === 'allowlist-would-add')
+  assert.equal(added.id, first.id)
+  assert.equal(added.commandKey, first.commandKey)
+  assert.equal(added.explanation, '按 package.json 安装依赖')
+  assert.ok(added.dependsOn.some(d => d.path === `${WS}\\package.json` && /^[0-9a-f]{64}$/.test(d.sha256)))
+  assert.ok(added.dependsOn.some(d => d.path === `${WS}\\.npmrc` && d.sha256 === null))
+
+  // The same command again: a (shadow) hit proposing allow-once; the model is not asked, the user still is.
+  assert.equal(await escalate(runtime, { callId: 'a2', args: harmless, answer: 'allowed-once' }), 'allowed-once')
+  await settle()
+  const second = log.lines.filter(l => l.event === 'request')[1]
+  assert.equal(second.layer, 'allowlist-hit')
+  assert.equal(second.proposed, 'allow-once')
+  assert.equal(second.allowlist.entryId, added.entryId)
+  assert.equal(second.sentToModel, undefined)
+  assert.equal(reviewer.calls.length, 1)
+  runtime.onResult({ callId: 'a2' }, clean())
+  assert.equal(log.lines.some(l => l.event === 'allowlist-would-remove'), false)
+  // A different command is not covered by that entry.
+  await escalate(runtime, { callId: 'a3', args: { ...harmless, command: 'npm install --no-audit' } })
+  assert.equal(log.lines.filter(l => l.event === 'request')[2].layer, 'model')
+  assert.equal(fs.existsSync(file), false)
+})
+
+test('allowlist (shadow): the decision waits for both the verdict and the result, whichever comes last', async () => {
+  const reviewer = deferredReviewer({ status: 'ok', decision: 'allow', risk: 'low', explanation: 'x' })
+  const { runtime, log } = withAllowlist({ reviewImpl: reviewer.impl })
+  await escalate(runtime, { callId: 'o1', args: harmless })
+  runtime.onResult({ callId: 'o1' }, clean())
+  await settle()
+  assert.equal(log.lines.some(l => l.event === 'allowlist-would-add'), false)
+  reviewer.release()
+  await settle()
+  await settle()
+  assert.equal(log.lines.filter(l => l.event === 'allowlist-would-add').length, 1)
+})
+
+test('allowlist (shadow): nothing is added without a low-risk allow, a clean finish, the user\'s yes and an eligible command', async () => {
+  const cases = [
+    { name: 'model asks', verdict: { status: 'ok', decision: 'ask_user', risk: 'medium', explanation: 'x' } },
+    { name: 'model allows at medium risk', verdict: { status: 'ok', decision: 'allow', risk: 'medium', explanation: 'x' } },
+    { name: 'model failed', verdict: { status: 'error', kind: 'timeout', message: 'x' } },
+    { name: 'non-zero exit', result: foreground(1, '', 'npm ERR! code E404') },
+    { name: 'access refused in the output', result: foreground(0, 'Error: EPERM: operation not permitted') },
+    { name: 'went to the background', result: { isError: false, content: [], value: { kind: 'background', jobId: 'pwsh-1', cwd: WS } } },
+    { name: 'user rejected', answer: 'rejected', result: rejected },
+    { name: 'ran somewhere else', result: { ...clean(), value: { ...clean().value, cwd: `${WS}\\build` } } },
+    { name: 'ineligible command', args: { command: 'git push origin main', sandbox_permissions: 'danger-full-access', justification: 'push' } },
+  ]
+  for (const c of cases) {
+    const { runtime, log } = withAllowlist({ reviewImpl: async () => c.verdict ?? { status: 'ok', decision: 'allow', risk: 'low', explanation: 'x' } })
+    await escalate(runtime, { callId: 'n1', args: c.args ?? harmless, answer: c.answer ?? 'allowed-once' })
+    await settle()
+    runtime.onResult({ callId: 'n1' }, c.result ?? clean())
+    await settle()
+    assert.equal(log.lines.some(l => l.event === 'allowlist-would-add'), false, c.name)
+    assert.equal(log.lines.some(l => l.event === 'error'), false, c.name)
+  }
+})
+
+test('allowlist (shadow): a command that created something outside the workspace is not added — a repeat would overwrite it', async () => {
+  const created = new Set()
+  const target = 'C:\\Users\\alice\\Desktop\\note.txt'
+  const onHost = createHost({ platform: 'win32', home: 'C:\\Users\\alice', env: ENV, dshHome: 'C:\\Users\\alice\\.dsh', tempDirs: [ENV.TEMP], probe: { realpath: () => undefined, exists: p => created.has(p.toLowerCase()) } })
+  const { runtime, log } = withAllowlist({ onHost })
+  await escalate(runtime, { callId: 'x1', args: { command: `Set-Content -LiteralPath '${target}' -Value hi`, sandbox_permissions: 'danger-full-access', justification: 'write a note' } })
+  await settle()
+  const request = log.lines.find(l => l.event === 'request')
+  assert.equal(request.layer, 'model')
+  assert.equal(request.allowlist.eligible, true)
+  created.add(target.toLowerCase())
+  runtime.onResult({ callId: 'x1' }, clean())
+  assert.equal(log.lines.some(l => l.event === 'allowlist-would-add'), false)
+})
+
+test('allowlist (shadow): a listed command that misbehaves or is turned down would be blocked, and then always asks', async () => {
+  const timedOut = { isError: false, content: [], value: { kind: 'foreground', timedOut: true, aborted: false, signal: null, stdout: { text: '' }, stderr: { text: '' } } }
+  for (const [name, answer, result, problem] of [
+    ['non-zero exit', 'allowed-once', foreground(2, '', 'boom'), 'exit-code:2'],
+    ['timed out', 'allowed-once', timedOut, 'timeout'],
+    ['went to the background (no exit code to check)', 'allowed-once', { isError: false, content: [], value: { kind: 'promoted', jobId: 'pwsh-9', cwd: WS } }, 'no-exit-code:promoted'],
+    ['user rejected', 'rejected', rejected, 'not-allowed:rejected'],
+  ]) {
+    const reviewer = countingReviewer()
+    const { runtime, log } = withAllowlist({ reviewImpl: reviewer.impl })
+    await escalate(runtime, { callId: 'b1', args: harmless })
+    await settle()
+    runtime.onResult({ callId: 'b1' }, clean())
+    await escalate(runtime, { callId: 'b2', args: harmless, answer })
+    runtime.onResult({ callId: 'b2' }, result)
+    const removed = log.lines.find(l => l.event === 'allowlist-would-remove')
+    assert.ok(removed, name)
+    assert.equal(removed.block, true)
+    assert.equal(removed.entryId, log.lines.find(l => l.event === 'allowlist-would-add').entryId)
+    assert.ok(removed.problems.includes(problem), `${name}: ${removed.problems}`)
+    await escalate(runtime, { callId: 'b3', args: harmless })
+    await settle()
+    const third = log.lines.filter(l => l.event === 'request')[2]
+    assert.equal(third.layer, 'allowlist-blocked', name)
+    assert.equal(third.proposed, 'ask')
+    assert.equal(reviewer.calls.length, 1, name)
+  }
+})
+
+test('the request line says whether a command may be listed and why not; write and edit never are', async () => {
+  const { runtime, log } = withAllowlist()
+  await escalate(runtime, { callId: 'e1', args: { command: 'git push origin main', sandbox_permissions: 'danger-full-access', justification: 'push' } })
+  const request = log.lines.find(l => l.event === 'request')
+  assert.match(request.commandKey, /^[0-9a-f]{16}$/)
+  assert.equal(request.allowlist.eligible, false)
+  assert.ok(request.allowlist.reasons.some(r => r.includes('git')))
+  const second = withAllowlist()
+  await escalate(second.runtime, { callId: 'e2', tool: 'write', args: { file_path: 'C:\\Users\\alice\\Desktop\\note.txt', content: 'hi', sandbox_permissions: 'danger-full-access', justification: 'note' } })
+  const write = second.log.lines.find(l => l.event === 'request')
+  assert.equal(write.layer, 'model')
+  assert.equal(write.commandKey, undefined)
+  assert.equal(write.allowlist.eligible, false)
+})
+
+test('a broken allowlist file means ask (allowlist-error): never allow, and no model call', async () => {
+  const file = path.join(tmp, 'broken', 'allowlist.json')
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, '{ not json')
+  const allowlist = createAllowlist({ file, pathKey: p => host.tools.key(p), shadow: true })
+  const reviewer = countingReviewer()
+  const { runtime, log } = makeRuntime({ reviewImpl: reviewer.impl, allowlist, fingerprint: input => fingerprintOf({ ...input, host, hashFile: hashProject, readText: readProject }), readText: readProject })
+  await escalate(runtime, { args: harmless })
+  await settle()
+  const request = log.lines.find(l => l.event === 'request')
+  assert.equal(request.layer, 'allowlist-error')
+  assert.equal(request.proposed, 'ask')
+  assert.match(request.allowlist.message, /格式不对/)
+  assert.equal(reviewer.calls.length, 0)
+  // A fingerprint that throws is the same: ask, and say why.
+  const broken = makeRuntime({ reviewImpl: reviewer.impl, allowlist, fingerprint: () => { throw new Error('hash failed') }, readText: readProject })
+  await escalate(broken.runtime, { args: harmless })
+  const line = broken.log.lines.find(l => l.event === 'request')
+  assert.deepEqual([line.layer, line.proposed, line.allowlist.message], ['allowlist-error', 'ask', 'hash failed'])
+  assert.equal(reviewer.calls.length, 0)
 })

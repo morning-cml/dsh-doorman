@@ -210,6 +210,21 @@ test('payload: npm scripts come from package.json', () => {
   assert.match(install.payload.scripts[0].package_scripts.note, /package\.json/)
 })
 
+test('payload: package scripts come from the project the command moved into', () => {
+  const files = {
+    [`${WS}\\package.json`.toLowerCase()]: JSON.stringify({ scripts: { build: 'echo root' } }),
+    [`${WS}\\build\\package.json`.toLowerCase()]: JSON.stringify({ scripts: { build: 'node evil.js' } }),
+  }
+  const readText = f => files[f.toLowerCase()]
+  const built = shellPayload('cd build; npm run build', { readText })
+  assert.equal(built.ok, true)
+  assert.deepEqual(built.payload.scripts[0].package_scripts, { build: 'node evil.js' })
+  // After a move nobody can follow, the reviewer could be shown the wrong file: not sure.
+  const unknown = shellPayload('cd $somewhere; npm run build', { readText })
+  assert.equal(unknown.ok, false)
+  assert.match(unknown.reason, /哪个目录/)
+})
+
 test('payload: write and edit send a short summary, never the whole file', () => {
   const content = '第一行\n'.repeat(1000)
   const write = buildPayload({ tool: 'write', args: { file_path: 'C:\\Users\\alice\\Desktop\\notes.txt', content, justification: 'x' }, facts: { target: 'C:\\Users\\alice\\Desktop\\notes.txt', exists: false }, host, workspaceRoot: WS, os: 'Windows 11', readText: () => undefined })

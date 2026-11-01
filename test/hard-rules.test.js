@@ -514,10 +514,25 @@ test('facts: a file whose text is run through Invoke-Expression is a script run'
 
 test('facts: deletes, writes and package scripts are recorded', () => {
   const r = pwsh('npm run build; Remove-Item C:\\Users\\alice\\Desktop\\out\\old.txt')
-  assert.deepEqual(r.facts.packageScripts, [{ manager: 'npm', script: 'build' }])
+  assert.deepEqual(r.facts.packageScripts, [{ manager: 'npm', script: 'build', cwd: WS }])
   assert.equal(r.facts.deletes.length, 1)
   assert.equal(r.facts.deletes[0].outside, true)
   assert.equal(r.facts.deletes[0].recursive, false)
+  assert.deepEqual(pwsh('cd build; npm test; cd $x; npm test').facts.packageScripts.map(p => p.cwd), [`${WS}\\build`, null])
+})
+
+test('facts: every command with its directory and arguments, and what it changes for later commands', () => {
+  const r = pwsh('cd build; git push origin main 2>&1 | Select-Object -Last 8')
+  assert.deepEqual(r.facts.invocations.map(i => [i.name, i.cwd, i.args]), [
+    ['set-location', WS, ['build']],
+    ['git', `${WS}\\build`, ['push', 'origin', 'main']],
+    ['select-object', `${WS}\\build`, ['-Last', '8']],
+  ])
+  assert.deepEqual(pwsh('git push $remote').facts.invocations[0].args, ['push', null])
+  assert.deepEqual(pwsh('npm test').facts.sessionChanges, [])
+  assert.deepEqual(pwsh('$env:NODE_OPTIONS = "--require x"; ${env:Path} += ";C:\\tools"').facts.sessionChanges, ['env:NODE_OPTIONS', 'env:Path'])
+  assert.deepEqual(pwsh('New-Item -Path env:\\X -Value 1; Remove-Item env:Y; Set-Item alias:\\ls Remove-Item; Rename-Item alias:\\ri gci').facts.sessionChanges, ['env:\\X', 'env:Y', 'alias:\\ls', 'alias:\\ri'])
+  assert.deepEqual(bash('NODE_OPTIONS=--require=x node a.js').facts.sessionChanges, ['env:NODE_OPTIONS'])
 })
 
 test('the parser never throws on garbage', () => {

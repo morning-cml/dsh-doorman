@@ -1,9 +1,11 @@
 /**
  * dsh-doorman — triage of sandbox-escalation approval prompts.
  *
- * This build (stage 2) runs the hard rules and the model review in
- * observe-only mode: every request still goes to the user, and the log
- * records what the plugin would have done next to what the user chose.
+ * This build (stage 3a) runs the hard rules, the allowlist and the model
+ * review in observe-only mode: every request still goes to the user, and the
+ * log records what the plugin would have done next to what the user chose.
+ * The allowlist only shadows: what it would add, hit or block is logged and
+ * kept in memory, and allowlist.json is never written.
  * Nothing here may break dsh: every step is guarded, and if anything is
  * missing the plugin simply forwards approvals unchanged.
  */
@@ -19,6 +21,8 @@ import { createLog } from './lib/log.js'
 import { createRuntime } from './lib/runtime.js'
 import { buildConfigSchema, readSettings } from './lib/settings.js'
 import { readState, recordVersion, writeState } from './lib/state.js'
+import { createAllowlist } from './lib/store/allowlist.js'
+import { fingerprintOf, hashFileSync } from './lib/store/fingerprint.js'
 
 export const name = 'dsh-doorman'
 
@@ -164,6 +168,8 @@ export function apply(ctx, config) {
       const hit = await credentials.resolve(keyName)
       return typeof hit?.value === 'string' && hit.value.trim() !== '' ? hit.value : undefined
     }
+    // Stage 3a: the allowlist only shadows (in memory, never written) until auto mode exists.
+    const allowlist = createAllowlist({ file: path.join(dataDir, 'allowlist.json'), pathKey: p => host.tools.key(p), shadow: true })
     const runtime = createRuntime({
       host,
       getSettings,
@@ -173,6 +179,8 @@ export function apply(ctx, config) {
       getKey,
       readText,
       osLabel: osLabel(),
+      allowlist,
+      fingerprint: input => fingerprintOf({ ...input, host, hashFile: hashFileSync, readText }),
     })
 
     let pluginVersion = null
@@ -197,6 +205,7 @@ export function apply(ctx, config) {
       ...(current.note ? { modeNote: current.note } : {}),
       model: settings.model,
       baseUrl: settings.baseUrl,
+      allowlist: allowlist.stats(),
       install: installFacts(packageDir),
     })
     reportProblems('startup')

@@ -74,6 +74,13 @@ test('the plugin sits before the approval prompt and records a full round trip',
   assert.equal(model.status, 'no-key')
   assert.equal(model.proposed, 'ask')
   assert.equal(fs.existsSync(path.join(dataDir, 'config.json')), false)
+  // Stage 3a: the allowlist is looked up and fingerprinted, but only shadows — its file is never written.
+  assert.equal(lines.find(l => l.event === 'startup').allowlist.shadow, true)
+  assert.equal(request.allowlist.lookup, 'miss')
+  assert.equal(request.allowlist.eligible, true)
+  assert.ok(request.allowlist.dependsOn.some(d => d.path === path.join(workspace, 'package.json') && d.sha256 === null))
+  assert.equal(lines.some(l => l.event.startsWith('allowlist-')), false)
+  assert.equal(fs.existsSync(path.join(dataDir, 'allowlist.json')), false)
 })
 
 test('without dsh services the plugin forwards everything unchanged', async () => {
