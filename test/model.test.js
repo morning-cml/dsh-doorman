@@ -192,8 +192,13 @@ test('payload: scripts the command runs are included; unreadable, binary or over
   assert.equal(shellPayload('.\\bin\\tool.exe --install').ok, false)
   assert.equal(shellPayload(`echo ${'x'.repeat(8100)}`).ok, false)
   // A script run twice is sent once; a file run through iex is sent whatever its extension.
-  const twice = shellPayload('& .\\scripts\\build.ps1; & .\\scripts\\build.ps1 -Release', { readText: f => (f === script ? 'x' : undefined) })
+  const twice = shellPayload(`& ${script}; & ${script} -Release`, { readText: f => (f === script ? 'x' : undefined) })
   assert.equal(twice.payload.scripts.length, 1)
+  // A PowerShell script may change the location: a relative path after it, or a computed one, cannot be reviewed.
+  assert.equal(shellPayload('& .\\scripts\\build.ps1; & .\\scripts\\build.ps1 -Release', { readText: f => (f === script ? 'x' : undefined) }).ok, false)
+  assert.equal(shellPayload('& $tool --install').ok, false)
+  assert.equal(shellPayload('node $script').ok, false)
+  assert.equal(shellPayload("$py = 'C:\\Users\\alice\\proj\\a.py'; python $py", { readText: () => 'print(1)' }).ok, true)
   const notes = 'C:\\Users\\alice\\proj\\notes.txt'
   const iex = shellPayload('iex (Get-Content .\\notes.txt -Raw)', { readText: f => (f === notes ? 'Get-Date' : undefined) })
   assert.deepEqual(iex.payload.scripts, [{ path: '<WORKSPACE>\\notes.txt', content: 'Get-Date' }])

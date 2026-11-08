@@ -33,6 +33,13 @@ const LINKS = {
 
 const index = new Map(EXISTING.map(p => [p.toLowerCase(), p]))
 
+/** The entries of EXISTING that are files; every other entry is a directory. */
+const FILES = new Set([
+  'C:\\Users\\alice\\proj\\package.json', 'C:\\Users\\alice\\proj\\scripts\\build.ps1', 'C:\\Users\\alice\\Desktop\\out\\old.txt',
+  'C:\\Users\\alice\\.dsh\\.credentials.yaml', 'C:\\Users\\alice\\.dsh\\dsh-doorman\\allowlist.json', 'C:\\Users\\alice\\.npmrc',
+  'C:\\Users\\alice\\.dsh\\profiles\\desktop\\node_modules\\@acme\\diagram-dsh\\skills\\diagram\\bin\\run.mjs',
+].map(p => p.toLowerCase()))
+
 /** Fake realpath with Windows case rules, links and 8.3 aliases. */
 function realpath(p) {
   let abs = W.resolve(p)
@@ -77,6 +84,10 @@ export const host = createHost({
   probe: {
     realpath,
     exists: p => realpath(p) !== undefined,
+    isDirectory: (p) => {
+      const real = realpath(p)
+      return real !== undefined && !FILES.has(real.toLowerCase())
+    },
   },
 })
 

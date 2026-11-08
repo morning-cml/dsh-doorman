@@ -381,7 +381,8 @@ table('only a person may decide these (hand to the user)', [
   ['icacls C:\\Users\\alice\\Documents /grant Everyone:F', 'ask', 'ask.accounts'],
   ['Set-ExecutionPolicy RemoteSigned -Scope CurrentUser', 'ask', 'ask.accounts'],
   ['Remove-Item -Recurse $target', 'ask', 'ask.unknown-delete-target'],
-  ['Remove-Item -Recurse (Get-Location).Path', 'ask', 'ask.unknown-delete-target'],
+  ['Remove-Item -Recurse (Get-Item $p).Parent.FullName', 'ask', 'ask.unknown-delete-target'],
+  ['Remove-Item -Recurse (Get-Location).Drive', 'ask', 'ask.unknown-delete-target'],
   ['Enter-PSSession -ComputerName srv01', 'ask', 'ask.remote'],
   ['Invoke-Command -ComputerName srv01 -ScriptBlock { hostname }', 'ask', 'ask.remote'],
   ["Set-Content run.ps1 'Write-Output hi'; & .\\run.ps1", 'ask', 'ask.write-then-run'],
@@ -495,6 +496,183 @@ test('write and edit: protected, sensitive and unusual targets', () => {
   const edit = file('edit', { file_path: 'C:\\Users\\alice\\.dsh\\dsh-doorman\\config.json', old_string: '"observe"', new_string: '"auto"' })
   if (edit.verdict !== 'deny') failures.push('edit of the plugin config must be denied')
   assert.equal(failures.length, 0, failures.join('\n'))
+})
+
+// Each command below really deletes C:\Users\alice\Documents (or /home/bob/Documents): a variable or the
+// directory changed where the analysis could not follow must not keep the value it had before.
+const DOCS = "'C:\\Users\\alice\\Documents'"
+table('a variable changed in a block, a loop body or behind the analysis\'s back is unknown after it', [
+  [`$p = 'build'; if ($true) { $p = ${DOCS} }; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; if($true){ $p = ${DOCS} }; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; foreach ($x in 1,2) { $p = ${DOCS} }; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; 1..2 | ForEach-Object { $p = ${DOCS} }; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; . { $p = ${DOCS} }; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; $null = ($p = ${DOCS}); Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; try { $p = ${DOCS} } catch {}; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; switch (1) { 1 { $p = ${DOCS} } }; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; function f { $script:p = ${DOCS} }; f; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; $script:p = ${DOCS}; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; $global:p = ${DOCS}; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; [string]$p = ${DOCS}; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; $p, $q = ${DOCS}, 'x'; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; Get-Item ${DOCS} -OutVariable p; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; Get-Item ${DOCS} -ov p; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; Get-Item nope -ErrorV p; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; Set-Item variable:p ${DOCS}; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; Set-Variable -Name p -Value ${DOCS} -Scope Script; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; Set-Variable -Name $n -Value ${DOCS}; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; Remove-Variable *; Remove-Item $p -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`$p = 'build'; $ExecutionContext.SessionState.PSVariable.Set('p', ${DOCS}); Remove-Item $p -Recurse`, 'ask', 'ask.too-complex'],
+  [`$p = 'build'; . .\\scripts\\build.ps1; Remove-Item $p -Recurse`, 'ask', 'ask.too-complex'],
+  [`$p = 'build'; . $script; Remove-Item $p -Recurse`, 'ask', 'ask.too-complex'],
+  // The command's own value of an environment variable wins over the Host's.
+  [`$env:TEMP = ${DOCS}; Remove-Item $env:TEMP -Recurse`, 'deny', 'deny.recursive-delete-outside'],
+  [`Remove-Item env:*; Remove-Item "$env:TEMP\\x" -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  [`[Environment]::SetEnvironmentVariable('TEMP', ${DOCS}); Remove-Item $env:TEMP -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  // Member access is not more text of a path; (Get-Location).Path and $PWD.Path are the directory.
+  ["$base = 'C:\\Users\\alice\\proj\\a'; Remove-Item $base.txt -Recurse", 'ask', 'ask.unknown-delete-target'],
+  ["$base = 'C:\\Users\\alice\\proj\\a'; Remove-Item \"$base.txt\"", 'pass'],
+  ["Remove-Item -Recurse (Join-Path (Get-Location).Path '..\\Documents')", 'deny', 'deny.recursive-delete-outside'],
+  // Plain changes are still followed.
+  [`$p = 'build'; Set-Variable -Name p -Value ${DOCS}; Remove-Item $p -Recurse`, 'deny', 'deny.recursive-delete-outside'],
+  [`$p = 'build'; \${p} = ${DOCS}; Remove-Item $p -Recurse`, 'deny', 'deny.recursive-delete-outside'],
+  ["$p = 'build'; if ($true) { Remove-Item $p -Recurse }", 'pass'],
+])
+
+table('a directory change that may not happen or may fail leaves the directory unknown', [
+  ['if ($true) { cd C:\\Users\\alice }; Remove-Item Documents -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['1 | ForEach-Object { sl C:\\Users\\alice }; Remove-Item Documents -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['& { cd C:\\Users\\alice }; Remove-Item Documents -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['function f { cd C:\\Users\\alice }; f; Remove-Item Documents -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['$null = (cd C:\\Users\\alice); Remove-Item Documents -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['cd nope; Remove-Item ..\\Documents -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['cd package.json; Remove-Item ..\\x -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['Push-Location C:\\Users\\alice; Pop-Location; Remove-Item Documents -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['& .\\scripts\\build.ps1; Remove-Item ..\\x -Recurse', 'ask', 'ask.unknown-delete-target'],
+  // A directory that exists is entered, unless something before the `cd` may have removed or replaced it
+  // (or failed to make it): the `cd` would fail and leave the shell where it was.
+  ['cd build; Remove-Item ..\\..\\Documents -Recurse', 'deny', 'deny.recursive-delete-outside'],
+  ['cd build && Remove-Item ..\\x -Recurse', 'pass'],
+  ['New-Item -ItemType Directory nope; cd nope; Remove-Item ..\\..\\Documents -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['mkdir nope; cd nope; Remove-Item ..\\x -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['Remove-Item build -Recurse -Force; cd build; Remove-Item ..\\x -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['git clone https://example.com/r.git build; cd build; Remove-Item ..\\x -Recurse', 'ask', 'ask.unknown-delete-target'],
+  ['Get-ChildItem; Write-Output hi; cd build; Remove-Item ..\\..\\Documents -Recurse', 'deny', 'deny.recursive-delete-outside'],
+  // .NET resolves relative paths against the process directory, which Set-Location does not move.
+  ["cd C:\\Users\\alice\\proj\\build; [IO.Directory]::Delete('..\\x', $true)", 'deny', 'deny.recursive-delete-outside'],
+  ["[Environment]::CurrentDirectory = 'C:\\Users\\alice'; [IO.Directory]::Delete('proj\\x', $true)", 'ask', 'ask.unknown-delete-target'],
+])
+
+table('bash: a command after a reserved word or a wrapper is still the command', [
+  ['if true; then rm -rf /home/bob/Documents; fi', 'deny', 'deny.recursive-delete-outside'],
+  ['if false; then :; else rm -rf /home/bob/Documents; fi', 'deny', 'deny.recursive-delete-outside'],
+  ['if false; then :; elif true; then rm -rf /home/bob/Documents; fi', 'deny', 'deny.recursive-delete-outside'],
+  ['if rm -rf /home/bob/Documents; then :; fi', 'deny', 'deny.recursive-delete-outside'],
+  ['for x in 1; do rm -rf /home/bob/Documents; done', 'deny', 'deny.recursive-delete-outside'],
+  ['while true; do rm -rf /home/bob/Documents; break; done', 'deny', 'deny.recursive-delete-outside'],
+  ['until false; do rm -rf /home/bob/Documents; done', 'deny', 'deny.recursive-delete-outside'],
+  ['{ rm -rf /home/bob/Documents; }', 'deny', 'deny.recursive-delete-outside'],
+  ['true && { rm -rf /home/bob/Documents; }', 'deny', 'deny.recursive-delete-outside'],
+  ['! rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ['time -p rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ['f() { rm -rf /home/bob/Documents; }; f', 'deny', 'deny.recursive-delete-outside'],
+  ['function f { rm -rf /home/bob/Documents; }; f', 'deny', 'deny.recursive-delete-outside'],
+  ['command rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ['builtin rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ['nohup rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ['nice -n 5 rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ['timeout -s KILL 5 rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ['env FOO=1 rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ["env -S 'rm -rf /home/bob/Documents'", 'deny', 'deny.recursive-delete-outside'],
+  ['env -C /home/bob rm -rf Documents', 'deny', 'deny.recursive-delete-outside'],
+  ["watch -n 1 'rm -rf /home/bob/Documents'", 'deny', 'deny.recursive-delete-outside'],
+  ['case x in x) rm -rf /tmp/a;; esac', 'ask', 'ask.too-complex'],
+  ['env $X rm -rf /home/bob/Documents', 'deny', 'deny.recursive-delete-outside'],
+  ['c=cd; $c /home/bob; rm -r Documents', 'ask', 'ask.unknown-delete-target'],
+  ['command -v rm', 'pass'],
+  // Directory changes inside compound commands, conditional links and stacks.
+  ['if true; then cd /home/bob; fi; rm -r Documents', 'ask', 'ask.unknown-delete-target'],
+  ['for x in 1; do cd /home/bob; done; rm -r Documents', 'ask', 'ask.unknown-delete-target'],
+  ['true && cd /home/bob || true; rm -r Documents', 'ask', 'ask.unknown-delete-target'],
+  ['pushd /home/bob; popd; rm -r Documents', 'ask', 'ask.unknown-delete-target'],
+  ['source ./env.sh; rm -r build', 'ask', 'ask.too-complex'],
+  ['cd /home/bob && rm -r Documents', 'deny', 'deny.recursive-delete-outside'],
+  // A subshell or a background job keeps its directory to itself.
+  ['(cd /home/bob); rm -r Documents', 'pass'],
+  ['cd /home/bob & rm -r Documents', 'pass'],
+], bash)
+
+table('cmd: if, for and ( ) blocks always go to a person, and what they run is still checked', [
+  ['cmd /c "if exist C:\\Users\\alice\\Documents rd /s /q C:\\Users\\alice\\Documents"', 'deny', 'deny.recursive-delete-outside'],
+  ['cmd /c "if exist x (echo y) else (rd /s /q C:\\Users\\alice\\Documents)"', 'deny', 'deny.recursive-delete-outside'],
+  ['cmd /c "for %i in (x) do rd /s /q C:\\Users\\alice\\Documents"', 'deny', 'deny.recursive-delete-outside'],
+  ["cmd /c \"for /f %i in ('rd /s /q C:\\Users\\alice\\Documents') do echo %i\"", 'deny', 'deny.recursive-delete-outside'],
+  ['cmd /c "(rd /s /q C:\\Users\\alice\\Documents)"', 'deny', 'deny.recursive-delete-outside'],
+  ['cmd /c "for /d %i in (C:\\Users\\alice\\Documents) do rd /s /q %i"', 'ask', 'ask.unknown-delete-target'],
+  ['cmd /c "if exist x (echo y)"', 'ask', 'ask.too-complex'],
+  ['cmd /c "pushd C:\\Users\\alice & popd & rd /s /q Documents"', 'ask', 'ask.unknown-delete-target'],
+  ['cmd /c "cd nope & rd /s /q ..\\Documents"', 'ask', 'ask.unknown-delete-target'],
+  ['cmd /c "set TEMP=C:\\Users\\alice\\Documents & rd /s /q %TEMP%"', 'ask', 'ask.unknown-delete-target'],
+  ['bash -c "if true; then rm -rf /c/Users/alice/Documents; fi"', 'deny', 'deny.recursive-delete-outside'],
+])
+
+test('foreach over a list of literal strings checks every item', () => {
+  const inside = "$dirs = @(\n 'C:\\Users\\alice\\proj\\a',\n 'C:\\Users\\alice\\proj\\b'\n); foreach($d in $dirs){ if(Test-Path -LiteralPath $d){ Remove-Item -LiteralPath $d -Recurse -Force } }"
+  const r = pwsh(inside)
+  assert.equal(r.verdict, 'pass')
+  assert.deepEqual(r.facts.deletes.map(d => d.path), [`${WS}\\a`, `${WS}\\b`])
+  assert.equal(pwsh(inside.replace("'C:\\Users\\alice\\proj\\b'", DOCS)).verdict, 'deny')
+  // Relative names joined to the current location, and the GetFullPath guard agents like to write.
+  const joined = pwsh("$files = 'a', 'b'; foreach ($f in $files) { $p = Join-Path (Get-Location) $f; Remove-Item -LiteralPath $p }")
+  assert.deepEqual([joined.verdict, joined.facts.deletes.map(d => d.path)], ['pass', [`${WS}\\a`, `${WS}\\b`]])
+  const guarded = pwsh([
+    '$targets = @("demo_1", "tmp_2")',
+    'foreach ($t in $targets) {',
+    '  $p = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $t))',
+    '  if ($p.StartsWith((Get-Location).Path, [System.StringComparison]::OrdinalIgnoreCase)) {',
+    '    Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue',
+    '  }',
+    '}',
+  ].join('\n'))
+  assert.deepEqual([guarded.verdict, guarded.facts.deletes.map(d => d.path)], ['pass', [`${WS}\\demo_1`, `${WS}\\tmp_2`]])
+  assert.equal(pwsh("foreach ($t in @('..\\..\\Documents')) { Remove-Item (Join-Path (Get-Location) $t) -Recurse }").verdict, 'deny')
+  // A list passed whole stays unknown; so do the loop variable after the loop and collections that cannot be told.
+  assert.equal(pwsh("$dirs = 'a', 'b'; Remove-Item -LiteralPath $dirs -Recurse").verdict, 'ask')
+  assert.equal(pwsh(`$d = 'build'; foreach ($d in @(${DOCS})) { }; Remove-Item $d -Recurse`).verdict, 'ask')
+  assert.equal(pwsh('foreach ($d in (Get-ChildItem x)) { Remove-Item $d -Recurse }').verdict, 'ask')
+  const many = Array.from({ length: 70 }, (_, i) => `'d${i}'`).join(', ')
+  assert.equal(pwsh(`foreach ($d in @(${many})) { Remove-Item $d -Recurse }`).verdict, 'ask')
+})
+
+table('an array can change in place, and a cmdlet can be redefined: neither is trusted', [
+  // The list is unrolled only right after it is written, and only if nothing can reach it meanwhile.
+  [`$l = 'a', 'b'; $l[1] = ${DOCS}; foreach ($d in $l) { Remove-Item $d -Recurse }`, 'ask', 'ask.unknown-delete-target'],
+  [`$l = 'a', 'b'; $l.SetValue(${DOCS}, 1); foreach ($d in $l) { Remove-Item $d -Recurse }`, 'ask', 'ask.unknown-delete-target'],
+  [`$l = 'a', 'b'; foreach ($d in $l) { $l[1] = ${DOCS}; Remove-Item $d -Recurse }`, 'ask', 'ask.unknown-delete-target'],
+  [`function f { $l[1] = ${DOCS} }; $l = 'a', 'b'; foreach ($d in $l) { f; Remove-Item $d -Recurse }`, 'ask', 'ask.unknown-delete-target'],
+  [`$sb = { $l[1] = ${DOCS} }; $l = 'a', 'b'; foreach ($d in $l) { & $sb; Remove-Item $d -Recurse }`, 'ask', 'ask.unknown-delete-target'],
+  ["$l = 'a', 'b'; foreach ($d in $l) { Remove-Item $d -Recurse }", 'pass'],
+  // `$o.p = …` changes what the variable holds.
+  [`$o = 'build'; $o.Length = 1; Remove-Item $o -Recurse`, 'ask', 'ask.unknown-delete-target'],
+  // A function or alias named after a cmdlet runs instead of it.
+  [`function Get-Location { [pscustomobject]@{ Path = ${DOCS} } }; Remove-Item -Recurse (Get-Location).Path`, 'ask', 'ask.unknown-delete-target'],
+  [`function Join-Path { ${DOCS} }; Remove-Item -Recurse (Join-Path a b)`, 'ask', 'ask.unknown-delete-target'],
+  ['Set-Alias gl Get-Date; Remove-Item -Recurse (gl).Path', 'ask', 'ask.unknown-delete-target'],
+  [`$PWD = [pscustomobject]@{ Path = ${DOCS} }; Remove-Item -Recurse $PWD.Path`, 'ask', 'ask.unknown-delete-target'],
+  ["function Remove-Item { 'hi' }; Remove-Item C:\\Users\\alice\\Documents -Recurse", 'ask', 'ask.too-complex'],
+])
+
+test('facts: a hashtable\'s values are code, its keys are not; a bare list is a value, not a run', () => {
+  assert.equal(pwsh(`Select-Object @{n='x'; e={ Remove-Item ${DOCS} -Recurse }}`).verdict, 'deny')
+  assert.equal(pwsh(`$h = @{ 'a=b' = 1; c = $(Remove-Item ${DOCS} -Recurse) }`).verdict, 'deny')
+  const property = pwsh("Get-ChildItem | Select-Object @{n='captures'; e={$_.Name}}")
+  assert.deepEqual([property.verdict, property.facts.unknownRuns, property.facts.commands.filter(c => c.includes('='))], ['pass', [], []])
+  const list = pwsh("$files = @(\n 'tests\\_audit.js', 'tests\\_audit.log'\n)")
+  assert.deepEqual([list.facts.runs, list.facts.commands], [[], []])
+  // What runs and cannot be told is recorded, so the reviewer is never asked to judge it blind.
+  assert.deepEqual(pwsh('& $tool --install').facts.unknownRuns.length, 1)
+  assert.deepEqual(pwsh('node -r ts-node/register $script').facts.unknownRuns.length, 1)
+  assert.deepEqual(pwsh('python -m pytest $x').facts.unknownRuns, [])
 })
 
 test('facts: opaque commands are marked, plain ones are not', () => {
