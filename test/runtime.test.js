@@ -200,6 +200,20 @@ test('a workspace that contains dsh home is contaminated: everything goes to the
   assert.ok(request.contaminatedBy)
 })
 
+test('an extra writable directory (dsh 0.2.2) that overlaps dsh contaminates the session like the workspace', async () => {
+  const reviewer = deferredReviewer()
+  const extra = makeRuntime({ reviewImpl: reviewer.impl, session: { sessionId: 's1', sandboxMode: 'workspace-write', workspaceRoot: WS, cwd: WS, extraWritableRoots: ['C:\\Users\\alice\\.dsh\\profiles'] } })
+  await escalate(extra.runtime, { args: harmless })
+  await settle()
+  assert.equal(reviewer.calls.length, 0)
+  const request = extra.log.lines.find(l => l.event === 'request')
+  assert.equal(request.layer, 'contaminated')
+  assert.match(request.contaminatedBy, /^额外可写目录/)
+  const plain = makeRuntime({ session: { sessionId: 's1', sandboxMode: 'workspace-write', workspaceRoot: WS, cwd: WS, extraWritableRoots: ['D:\\data'] } })
+  await escalate(plain.runtime, { args: harmless })
+  assert.notEqual(plain.log.lines.find(l => l.event === 'request').layer, 'contaminated')
+})
+
 test('the previous failed attempt is attached, even without dsh\'s sandbox marker', async () => {
   const reviewer = deferredReviewer()
   const { runtime, log } = makeRuntime({ reviewImpl: reviewer.impl })

@@ -120,6 +120,8 @@ function sessionInfo(ctx, agent) {
     sessionId: session.header?.id,
     sandboxMode: policy?.mode,
     workspaceRoot: policy?.workspaceRoot,
+    // dsh 0.2.2+: directories the sandbox lets the agent write besides the workspace.
+    extraWritableRoots: Array.isArray(policy?.additionalWritableRoots) ? policy.additionalWritableRoots.filter(r => typeof r === 'string') : [],
     cwd: typeof cwd === 'string' ? cwd : (session.header?.cwd ?? policy?.workspaceRoot),
     ...permissionPreset(ctx, session),
     origin: typeof session.header?.origin === 'string' ? session.header.origin : undefined,
