@@ -25,7 +25,7 @@ window.__ModuleLoader__.load({
 
     const zh = {
       summary: '提权审批分流：硬性规则 + 千问审查',
-      intro: '通过了硬性规则的提权申请，会把整理、打码后的内容发给下面这个模型判断。当前是“只观察”模式：模型的判断只写进日志，审批弹窗照常出现。',
+      intro: '通过了硬性规则的提权申请，会把整理、打码后的内容发给下面这个模型判断。默认“只观察”：模型的判断只写进日志，审批弹窗照常出现。自动模式只在权限选了“门卫自动审批”的会话里生效（开启方法见使用说明）。',
       endpoint: '接口地址',
       endpointHint: '任何 OpenAI 兼容接口都可以；地址必须以 https:// 开头。',
       presetCn: '阿里云百炼（中国内地·北京）',
@@ -66,7 +66,7 @@ window.__ModuleLoader__.load({
     }
     const en = {
       summary: 'Approval triage: hard rules + model review',
-      intro: 'Escalation requests that pass the hard rules are sanitised and sent to the model below. Observe-only for now: the model\'s verdict is only logged and the approval prompt still appears.',
+      intro: 'Escalation requests that pass the hard rules are sanitised and sent to the model below. Observe-only by default: the model\'s verdict is only logged and the approval prompt still appears. Auto mode acts only in sessions whose permission is "门卫自动审批" (doorman; see the README to turn it on).',
       endpoint: 'Endpoint',
       endpointHint: 'Any OpenAI-compatible endpoint; it must start with https://.',
       presetCn: 'Alibaba Cloud Model Studio (Beijing)',

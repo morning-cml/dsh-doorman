@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "dsh-doorman",
-    "description": "Sandbox-escalation approval triage: hard rules. Observe-only for now — every prompt still reaches you; the plugin only logs what it would have done."
+    "description": "Sandbox-escalation approval triage: hard rules + a second-model review. Observe-only by default — every prompt still reaches you and the plugin only logs what it would have done; auto mode acts only in sessions set to the doorman permission preset."
   }
 }

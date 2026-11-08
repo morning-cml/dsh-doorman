@@ -74,13 +74,50 @@ test('the plugin sits before the approval prompt and records a full round trip',
   assert.equal(model.status, 'no-key')
   assert.equal(model.proposed, 'ask')
   assert.equal(fs.existsSync(path.join(dataDir, 'config.json')), false)
-  // Stage 3a: the allowlist is looked up and fingerprinted, but only shadows — its file is never written.
+  // The allowlist is looked up and fingerprinted, but only shadows — its file is never written.
   assert.equal(lines.find(l => l.event === 'startup').allowlist.shadow, true)
   assert.equal(request.allowlist.lookup, 'miss')
   assert.equal(request.allowlist.eligible, true)
   assert.ok(request.allowlist.dependsOn.some(d => d.path === path.join(workspace, 'package.json') && d.sha256 === null))
   assert.equal(lines.some(l => l.event.startsWith('allowlist-')), false)
   assert.equal(fs.existsSync(path.join(dataDir, 'allowlist.json')), false)
+})
+
+test('auto mode\'s session facts: the permission preset, and whether a person started the current turn', async () => {
+  const events = [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'user/message', data: { source: { kind: 'user', rpcId: 'rpc-1' } } },
+    { type: 'turn/end', data: {} },
+    { type: 'turn/start', data: { turn: 2 } },
+    { type: 'user/message', data: { source: { kind: 'schedule' } } },
+    { type: 'user/message', data: { source: { kind: 'tool' } } },
+  ]
+  const session = { header: { id: 'sched', cwd: workspace }, get seq() { return events.length }, eventAt: seq => events[seq] }
+  const permissionPresets = { current: s => (s === session ? 'doorman' : 'workspace-write'), names: ['read-only', 'workspace-write', 'danger-full-access', 'doorman'] }
+  const ctx = fakeContext({ sandboxPolicy: { resolve: () => ({ mode: 'workspace-write', workspaceRoot: workspace }) }, permissionPresets })
+  apply(ctx, { mode: 'auto', autoModeConfirmedForVersion: '0.2.1-rc.5' })
+  ctx.on('approval/request', async () => 'rejected')
+  const agent = { id: 'b', session }
+  const ask = async (callId) => {
+    const args = Object.freeze({ command: `Write-Output ${callId}`, sandbox_permissions: 'danger-full-access', justification: 'print' })
+    await ctx.waterfall('tools/pre-execute', { callId, name: 'pwsh', arguments: args, agent }, async () => ({ kind: 'allow' }))
+    await ctx.waterfall('approval/request', { agent, toolName: 'pwsh', callId, reason: 'escalate sandbox to danger-full-access: print' }, async () => 'unavailable')
+    return readLog().find(l => l.event === 'request' && l.callId === callId)
+  }
+  const scheduled = await ask('t1')
+  assert.equal(scheduled.preset, 'doorman')
+  assert.equal(scheduled.unattended, true)
+  assert.equal(scheduled.trigger, 'schedule')
+  // Outside dsh the running version cannot be read, so auto mode stays observe and says why.
+  assert.deepEqual([scheduled.configuredMode, scheduled.mode], ['auto', 'observe'])
+  assert.match(scheduled.modeNote, /还没对照/)
+  // A person writing in the same turn means someone is watching.
+  events.push({ type: 'user/message', data: { source: { kind: 'user', rpcId: 'rpc-2' } } })
+  const watched = await ask('t2')
+  assert.equal(watched.unattended, undefined)
+  // A session log that cannot be read counts as watched too.
+  session.eventAt = () => { throw new Error('gone') }
+  assert.equal((await ask('t3')).unattended, undefined)
 })
 
 test('without dsh services the plugin forwards everything unchanged', async () => {

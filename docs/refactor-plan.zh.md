@@ -53,7 +53,8 @@
 ## 3. 阶段计划（可执行）
 
 > 现状：**3a 已完成**（2026-11-01，插件 0.3.0：observe + 硬规则 L1 + 影子放行清单 L2 + 模型复核 L3，全部只记日志；
-> 落地细节和重放结果见 design §15）。跑在 dsh 0.2.1-rc.5（已核实）。**下一步：3b。**
+> 落地细节和重放结果见 design §15；0.3.0 已装进用户的 dsh）。**3b 已完成**（插件 0.4.0；11-01…11-07 试用，11-08 核对日志通过后提交；
+> 细节和试用结果见 design §16）。11-06 dsh 自动更新到 0.2.2-rc.1（未核实 → 自动退回只观察）。下一步：核实 0.2.2-rc.1、处理试用暴露的问题 → 3c。
 
 ### 3a — 放行清单 L2 + 指纹 + 事后检查（仍 observe，清单只影子记录）
 
@@ -90,12 +91,30 @@
 
 ### 3b — auto 模式真正执行 + 写前快照 + 无人值守兜底
 
+> **✅ 2026-11-01 实现（插件 0.4.0），11-08 核对试用日志通过后提交**（结果见 design §16「试用结果」）。开工前用户确认（“按建议”）：① **L2 整个 3b 仍只影子记录**——auto 只按 L1 + L3 执行，
+> 影子命中也照样送 L3（留下“清单会放的、模型怎么判”的证据，将来再决定是否真放）；blocked / 清单读不了仍 ask；② **git push 不加配方**，交给 L3。
+> 落地时核实的接口（rc.5 与 0.2.2-alpha.2 一致）：`approval/request` 瀑布直接返回 `'allowed-once'`/`'rejected'`/`'cancelled'`（拒绝时 agent 看到的是 dsh 固定措辞，
+> 插件附不了理由，原因只进日志）；子代理会话被 dsh 固定为 `never` 策略，审批到不了插件；定时提醒的消息 `source.kind === 'schedule'`，
+> 人发的消息是 `kind: 'user'` 且带 `rpcId`；插件**不能**往权限菜单加预设（只有官方 auto-review 能占固定的 `auto`，且是 full-access），
+> 所以“按会话开启”= 用户在 profile 的 `permission` 行补一个 `doorman` 预设（workspace-write + ask，排在 workspace-write 后面），
+> 插件读 `permissionPresets.current(session)`。auto 还额外要求版本在 `VERIFIED_DSH_VERSIONS` 里。重放：自动放行 16 次全部是用户允许的（误放 0）；
+> 会自动拒绝 6 次（用户都允许了：旧提示词 deny 的截图脚本 3 次、硬性规则 3 次，其中 2 次是改 cordis.patch.yml，故意拒绝）。
+
+> **试用方式（用户 2026-11-01 定）**：0.4.0 已装进用户的 dsh（本地安装包，profile 已加 `doorman` 预设和 `mode: auto`），不做专门试用，
+> 正常用一段时间后**一次性看日志**；看完没问题再提交推送，并把 profile 切回 GitHub 来源。到时逐项核对：
+> 1. `startup`：插件 0.4.0、`mode: auto`；有 `dsh-version-changed` 就确认已退回只观察；启动和运行中的所有 `error` 行（where: approval / auto / snapshot-after / allowlist）。
+> 2. 选了 doorman 预设的会话里 `decidedBy: doorman` 的逐条看：放行的命令和千问理由是否合理、`result` 是否正常、`outsideChanges` 有没有删东西、快照在不在、能不能对比；
+>    拒绝的（`because`: hard-deny / model-deny / unattended）请用户确认有没有误拒。
+> 3. 交给用户的（`because`: model-ask 等）：用户实际怎么点的，哪类总是允许（3c 调提示词的依据）。
+> 4. 影子清单：would-add、命中（`allowlist.lookup: hit`）时千问怎么判、would-remove。
+> 5. `outcome.waitedMs`、快照目录的份数和大小；最后跑一次 `node tools/replay.mjs`。
+
 **目标**：打开自动模式（按会话），真正按判定放行/拒绝；写文件前拍快照；无人值守会话绝不挂起。
 
 **动的文件**
 - 新建 `lib/store/snapshots.js`：自动放行且涉及文件时，**写入前**存快照到 `~/.dsh/dsh-doorman/snapshots/<eventId>.json`。限额借 edit-approval：仅文本、单文件 ≤256KB、每事件 ≤5 个文件；超限不存、标记不可 diff。命令类按 design D3 的浅快照（工作区外被点名目录：文件名/大小/修改时间，最多 5 目录 2 层 2000 项）。
 - 改 `lib/runtime.js`：
-  - `autoAvailable = true`；`mode()` 为 auto 且 `autoModeConfirmedForVersion === dshVersion` 时，`onApproval` **真正返回决定**（allow-once 放行 / reject 拒 / ask 交给你），不再只记录。allowlist 命中此时真正写入/更新 `hits`、`lastUsedAt`；事后检查真正加入/移出条目。
+  - `autoAvailable = true`；`mode()` 为 auto 且 `autoModeConfirmedForVersion === dshVersion` 时，`onApproval` **真正返回决定**（allow-once 放行 / reject 拒 / ask 交给你），不再只记录。~~allowlist 命中此时真正写入/更新 `hits`、`lastUsedAt`；事后检查真正加入/移出条目。~~（已按用户决定改为：3b 里清单仍只影子记录，见上方说明；真正放开清单要单独再定。）
   - **无人值守兜底（借 approval-policy）**：auto 模式下，若会话无人盯（`session.header.origin === 'subagent'`，或该 turn 最后一条溯源 user 消息 `source.kind` 为 `schedule`/`cron`），则“交给你”没有意义 → 直接 **fail-closed 拒绝**，reason 写明“无人值守会话，fail-safe 拒绝”。绝不无限挂起。需在 `sessionInfo` 里补读 origin / 最后溯源消息（实现时核实 dsh 会话事件接口）。
 - **按会话预设开启（借 official / approval-gate）**：除全局 `mode` 外，支持用权限预设决定本会话是否启用 auto（这样只对可信会话开）。实现时核实 dsh `permissionPresets` 的贡献/读取接口（官方用 `permissionPresets.current(session.events)`；approval-gate 贡献一个 `auto-approve` 预设）。门卫保持 workspace-write 沙箱，不改成 full-access。
 

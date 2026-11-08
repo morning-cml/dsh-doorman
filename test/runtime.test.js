@@ -1,4 +1,4 @@
-// Runtime: observe-only behaviour around dsh's events, with a fake event bus and a fake reviewer.
+// Runtime: observe and auto behaviour around dsh's events, with a fake event bus and a fake reviewer.
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
@@ -27,7 +27,7 @@ function deferredReviewer(result = { status: 'ok', decision: 'allow', risk: 'low
   return { impl, calls, release: () => release() }
 }
 
-function makeRuntime({ mode = 'observe', confirmed = '', version = '0.2.0-rc.2', session, autoAvailable = false, reviewImpl, readText = () => undefined, getSettings, allowlist, fingerprint, onHost = host } = {}) {
+function makeRuntime({ mode = 'observe', confirmed = '', version = '0.2.0-rc.2', verified = true, session, autoAvailable = false, reviewImpl, readText = () => undefined, getSettings, allowlist, fingerprint, snapshots, onHost = host } = {}) {
   const log = memoryLog()
   const settings = { ...readSettings({}).settings, mode, autoModeConfirmedForVersion: confirmed }
   const reviewer = reviewImpl ?? (async () => ({ status: 'ok', decision: 'allow', risk: 'low', explanation: 'x' }))
@@ -36,7 +36,9 @@ function makeRuntime({ mode = 'observe', confirmed = '', version = '0.2.0-rc.2',
     getSettings: getSettings ?? (() => settings),
     log,
     dshVersion: version,
+    dshVersionVerified: verified,
     autoAvailable,
+    snapshots,
     sessionInfo: () => session ?? { sessionId: 's1', sandboxMode: 'workspace-write', workspaceRoot: WS, cwd: WS },
     getKey: async () => 'sk-test-key-0123456789abcdef',
     readText,
@@ -133,18 +135,23 @@ test('a failing reviewer is logged as "ask" and never affects the prompt', async
   assert.equal(model.proposed, 'ask')
 })
 
-test('auto mode is not available in this build: it falls back to observe and says why', async () => {
+test('a build without auto mode falls back to observe and says why', async () => {
   const { runtime, log } = makeRuntime({ mode: 'auto', confirmed: '0.2.0-rc.2' })
   assert.equal(await escalate(runtime, { args: deleteDocs, answer: 'allowed-once' }), 'allowed-once')
   const request = log.lines.find(l => l.event === 'request')
   assert.equal(request.mode, 'observe')
-  assert.match(request.modeNote, /阶段 3/)
+  assert.match(request.modeNote, /没有打开自动模式/)
 })
 
-test('auto mode with an unconfirmed dsh version falls back to observe', () => {
+test('auto mode needs a dsh version both verified by the plugin and confirmed by the user', () => {
   const unconfirmed = makeRuntime({ mode: 'auto', confirmed: '0.1.0', autoAvailable: true }).runtime.mode()
   assert.equal(unconfirmed.effective, 'observe')
   assert.match(unconfirmed.note, /还没确认/)
+  const unverified = makeRuntime({ mode: 'auto', confirmed: '0.2.0-rc.2', verified: false, autoAvailable: true }).runtime.mode()
+  assert.equal(unverified.effective, 'observe')
+  assert.match(unverified.note, /还没对照/)
+  const unknown = makeRuntime({ mode: 'auto', confirmed: '', version: null, autoAvailable: true }).runtime.mode()
+  assert.equal(unknown.effective, 'observe')
   assert.equal(makeRuntime({ mode: 'auto', confirmed: '0.2.0-rc.2', autoAvailable: true }).runtime.mode().effective, 'auto')
 })
 
@@ -358,7 +365,7 @@ function countingReviewer(result = { status: 'ok', decision: 'allow', risk: 'low
 const clean = (stdout = 'ok') => foreground(0, stdout)
 const rejected = { isError: true, error: { message: 'the user rejected escalating this command to "danger-full-access"' }, content: [] }
 
-test('allowlist (shadow): a clean, model-approved command would be added, and the same command then hits without a model call', async () => {
+test('allowlist (shadow): a clean, model-approved command would be added; the same command then hits, and still goes to the model', async () => {
   const reviewer = countingReviewer()
   const { runtime, log, file } = withAllowlist({ reviewImpl: reviewer.impl })
   await escalate(runtime, { callId: 'a1', args: harmless })
@@ -376,17 +383,19 @@ test('allowlist (shadow): a clean, model-approved command would be added, and th
   assert.ok(added.dependsOn.some(d => d.path === `${WS}\\package.json` && /^[0-9a-f]{64}$/.test(d.sha256)))
   assert.ok(added.dependsOn.some(d => d.path === `${WS}\\.npmrc` && d.sha256 === null))
 
-  // The same command again: a (shadow) hit proposing allow-once; the model is not asked, the user still is.
+  // The same command again: a shadow hit is only recorded — the model still reviews it, and the user is still asked.
   assert.equal(await escalate(runtime, { callId: 'a2', args: harmless, answer: 'allowed-once' }), 'allowed-once')
   await settle()
   const second = log.lines.filter(l => l.event === 'request')[1]
-  assert.equal(second.layer, 'allowlist-hit')
-  assert.equal(second.proposed, 'allow-once')
+  assert.equal(second.layer, 'model')
+  assert.equal(second.allowlist.lookup, 'hit')
   assert.equal(second.allowlist.entryId, added.entryId)
-  assert.equal(second.sentToModel, undefined)
-  assert.equal(reviewer.calls.length, 1)
+  assert.equal(second.sentToModel.command, 'npm install')
+  assert.equal(reviewer.calls.length, 2)
   runtime.onResult({ callId: 'a2' }, clean())
   assert.equal(log.lines.some(l => l.event === 'allowlist-would-remove'), false)
+  // A hit is not added again.
+  assert.equal(log.lines.filter(l => l.event === 'allowlist-would-add').length, 1)
   // A different command is not covered by that entry.
   await escalate(runtime, { callId: 'a3', args: { ...harmless, command: 'npm install --no-audit' } })
   assert.equal(log.lines.filter(l => l.event === 'request')[2].layer, 'model')
@@ -469,7 +478,8 @@ test('allowlist (shadow): a listed command that misbehaves or is turned down wou
     const third = log.lines.filter(l => l.event === 'request')[2]
     assert.equal(third.layer, 'allowlist-blocked', name)
     assert.equal(third.proposed, 'ask')
-    assert.equal(reviewer.calls.length, 1, name)
+    // The first run and the (shadow) hit were reviewed; the blocked one is not.
+    assert.equal(reviewer.calls.length, 2, name)
   }
 })
 
@@ -508,4 +518,161 @@ test('a broken allowlist file means ask (allowlist-error): never allow, and no m
   const line = broken.log.lines.find(l => l.event === 'request')
   assert.deepEqual([line.layer, line.proposed, line.allowlist.message], ['allowlist-error', 'ask', 'hash failed'])
   assert.equal(reviewer.calls.length, 0)
+})
+
+// ---------------------------------------------------------------- auto mode
+
+const DOORMAN = Object.freeze({ sessionId: 's1', sandboxMode: 'workspace-write', workspaceRoot: WS, cwd: WS, preset: 'doorman', presetConfigured: true, trigger: 'human' })
+
+/** A runtime in auto mode, in a session that picked the plugin's preset. */
+function autoRuntime(options = {}) {
+  return makeRuntime({ mode: 'auto', confirmed: '0.2.0-rc.2', autoAvailable: true, session: DOORMAN, ...options })
+}
+
+/** One escalation in auto mode; `asked` says whether it reached the user. */
+async function decideAuto(runtime, { callId = 'c1', tool = 'pwsh', args, answer = 'allowed-once', signal } = {}) {
+  runtime.onPreExecute({ callId, name: tool, arguments: Object.freeze(args), agent })
+  let asked = false
+  const outcome = await runtime.onApproval(
+    { agent, toolName: tool, callId, reason: `escalate sandbox to danger-full-access: ${args.justification}`, ...(signal ? { signal } : {}) },
+    async () => { asked = true; return answer },
+  )
+  return { outcome, asked }
+}
+
+const verdict = (decision, risk) => ({ status: 'ok', decision, risk, explanation: 'x', model: 'qwen3.7-plus' })
+const forcePush = { command: 'git push --force origin main', sandbox_permissions: 'danger-full-access', justification: 'push' }
+
+test('auto: a model allow is allowed once by the plugin itself — the user is not asked', async () => {
+  const reviewer = countingReviewer(verdict('allow', 'low'))
+  const { runtime, log } = autoRuntime({ reviewImpl: reviewer.impl })
+  const { outcome, asked } = await decideAuto(runtime, { args: harmless })
+  assert.equal(outcome, 'allowed-once')
+  assert.equal(asked, false)
+  assert.equal(reviewer.calls.length, 1)
+  assert.deepEqual(log.lines.map(l => l.event), ['request', 'model', 'outcome'])
+  const request = log.lines.find(l => l.event === 'request')
+  assert.deepEqual([request.mode, request.layer, request.preset], ['auto', 'model', 'doorman'])
+  const decided = log.lines.find(l => l.event === 'outcome')
+  assert.deepEqual([decided.id, decided.decidedBy, decided.outcome, decided.because], [request.id, 'doorman', 'allowed-once', 'model-allow'])
+  // A medium-risk allow is an allow too (the prompt's allow never deletes or overwrites anything outside).
+  const medium = autoRuntime({ reviewImpl: countingReviewer(verdict('allow', 'medium')).impl })
+  assert.equal((await decideAuto(medium.runtime, { args: harmless })).outcome, 'allowed-once')
+})
+
+test('auto: a model deny is rejected; ask_user and every failure to get a verdict go to the user', async () => {
+  const deny = autoRuntime({ reviewImpl: countingReviewer(verdict('deny', 'high')).impl })
+  assert.deepEqual(await decideAuto(deny.runtime, { args: harmless }), { outcome: 'rejected', asked: false })
+  assert.equal(deny.log.lines.find(l => l.event === 'outcome').because, 'model-deny')
+
+  for (const [name, result] of [
+    ['ask_user', verdict('ask_user', 'medium')],
+    ['timeout', { status: 'error', kind: 'timeout', message: 'x' }],
+    ['no key', { status: 'no-key', message: 'x' }],
+    ['budget spent', { status: 'rate-limited', message: 'x' }],
+    ['malformed answer', { status: 'invalid', message: 'x' }],
+  ]) {
+    const { runtime, log } = autoRuntime({ reviewImpl: countingReviewer(result).impl })
+    assert.deepEqual(await decideAuto(runtime, { args: harmless, answer: 'rejected' }), { outcome: 'rejected', asked: true }, name)
+    const decided = log.lines.find(l => l.event === 'outcome')
+    assert.deepEqual([decided.decidedBy, decided.because], ['user', 'model-ask'], name)
+  }
+  const exploding = autoRuntime({ reviewImpl: async () => { throw new Error('reviewer exploded') } })
+  assert.deepEqual(await decideAuto(exploding.runtime, { args: harmless }), { outcome: 'allowed-once', asked: true })
+  assert.equal(exploding.log.lines.find(l => l.event === 'model').status, 'error')
+})
+
+test('auto: a hard deny is rejected without asking the model; a hard ask goes to the user', async () => {
+  const reviewer = countingReviewer()
+  const { runtime, log } = autoRuntime({ reviewImpl: reviewer.impl })
+  assert.deepEqual(await decideAuto(runtime, { callId: 'd1', args: deleteDocs }), { outcome: 'rejected', asked: false })
+  assert.equal(log.lines.find(l => l.event === 'outcome').because, 'hard-deny')
+  assert.deepEqual(await decideAuto(runtime, { callId: 'd2', args: forcePush }), { outcome: 'allowed-once', asked: true })
+  const outcomes = log.lines.filter(l => l.event === 'outcome')
+  assert.deepEqual([outcomes[1].decidedBy, outcomes[1].because], ['user', 'hard-ask'])
+  // A script that cannot be read is "not sure" as well.
+  assert.deepEqual(await decideAuto(runtime, { callId: 'd3', args: { command: '& .\\scripts\\build.ps1', sandbox_permissions: 'danger-full-access', justification: 'build' } }), { outcome: 'allowed-once', asked: true })
+  assert.equal(log.lines.filter(l => l.event === 'outcome')[2].because, 'model-input')
+  assert.equal(reviewer.calls.length, 0)
+})
+
+test('auto: only in a session whose permission preset is the plugin\'s — elsewhere it observes', async () => {
+  for (const [name, session, note] of [
+    ['another preset', { ...DOORMAN, preset: 'workspace-write' }, /不是“doorman”/],
+    ['preset unknown', { ...DOORMAN, preset: undefined }, /读不到本会话的权限预设/],
+    ['preset not configured', { ...DOORMAN, preset: 'workspace-write', presetConfigured: false }, /权限预设里还没有“doorman”/],
+  ]) {
+    const reviewer = deferredReviewer(verdict('deny', 'high'))
+    const { runtime, log } = autoRuntime({ session, reviewImpl: reviewer.impl })
+    // Observe: the user is asked at once, and the model only reviews alongside.
+    assert.deepEqual(await decideAuto(runtime, { args: harmless }), { outcome: 'allowed-once', asked: true }, name)
+    const request = log.lines.find(l => l.event === 'request')
+    assert.equal(request.mode, 'observe', name)
+    assert.equal(request.configuredMode, 'auto', name)
+    assert.match(request.modeNote, note, name)
+    assert.equal(log.lines.find(l => l.event === 'outcome').decidedBy, 'user', name)
+    reviewer.release()
+  }
+})
+
+test('auto: in a session nobody is watching (a scheduled turn, a subagent) what would ask is rejected instead', async () => {
+  for (const session of [{ ...DOORMAN, trigger: 'schedule' }, { ...DOORMAN, origin: 'subagent', trigger: 'other' }]) {
+    const ask = autoRuntime({ session, reviewImpl: countingReviewer(verdict('ask_user', 'medium')).impl })
+    assert.deepEqual(await decideAuto(ask.runtime, { callId: 'u1', args: harmless }), { outcome: 'rejected', asked: false })
+    assert.equal(ask.log.lines.find(l => l.event === 'outcome').because, 'unattended')
+    assert.equal(ask.log.lines.find(l => l.event === 'request').unattended, true)
+    assert.deepEqual(await decideAuto(ask.runtime, { callId: 'u2', args: forcePush }), { outcome: 'rejected', asked: false })
+    // A model allow is still allowed.
+    const allow = autoRuntime({ session, reviewImpl: countingReviewer(verdict('allow', 'low')).impl })
+    assert.deepEqual(await decideAuto(allow.runtime, { args: harmless }), { outcome: 'allowed-once', asked: false })
+  }
+  // Observe mode never acts, watched or not.
+  const observing = makeRuntime({ session: { ...DOORMAN, trigger: 'schedule' } })
+  assert.deepEqual(await decideAuto(observing.runtime, { args: harmless }), { outcome: 'allowed-once', asked: true })
+  // A turn whose start cannot be read counts as watched.
+  const unknown = autoRuntime({ session: { ...DOORMAN, trigger: 'unknown' }, reviewImpl: countingReviewer(verdict('ask_user', 'medium')).impl })
+  assert.equal((await decideAuto(unknown.runtime, { args: harmless })).asked, true)
+})
+
+test('auto: a request withdrawn while the model is reviewing is cancelled, never asked', async () => {
+  const reviewer = deferredReviewer(verdict('allow', 'low'))
+  const { runtime, log } = autoRuntime({ reviewImpl: reviewer.impl })
+  const controller = new AbortController()
+  const pending = decideAuto(runtime, { args: harmless, signal: controller.signal })
+  await settle()
+  assert.equal(reviewer.calls[0].signal, controller.signal)
+  controller.abort()
+  reviewer.release()
+  assert.deepEqual(await pending, { outcome: 'cancelled', asked: false })
+  assert.equal(log.lines.find(l => l.event === 'outcome').because, 'request-cancelled')
+})
+
+test('auto: out-of-scope requests, a contaminated workspace and mode off are never decided by the plugin', async () => {
+  const { runtime, log } = autoRuntime()
+  const outcome = await runtime.onApproval({ agent, toolName: 'plugin_manager', callId: 'p1', reason: 'escalate sandbox to danger-full-access: x' }, async () => 'rejected')
+  assert.equal(outcome, 'rejected')
+  assert.equal(log.lines.find(l => l.event === 'outcome').decidedBy, 'user')
+  const contaminated = autoRuntime({ session: { ...DOORMAN, workspaceRoot: 'C:\\Users\\alice', cwd: 'C:\\Users\\alice' } })
+  assert.deepEqual(await decideAuto(contaminated.runtime, { args: deleteDocs, answer: 'rejected' }), { outcome: 'rejected', asked: true })
+  const off = autoRuntime({ mode: 'off' })
+  assert.deepEqual(await decideAuto(off.runtime, { args: deleteDocs }), { outcome: 'allowed-once', asked: true })
+  assert.equal(off.log.lines.length, 0)
+})
+
+test('auto: the shadow allowlist never decides — a hit is still judged by the model, a blocked entry still asks', async () => {
+  let answer = verdict('allow', 'low')
+  const { runtime, log } = withAllowlist({ mode: 'auto', confirmed: '0.2.0-rc.2', autoAvailable: true, session: DOORMAN, reviewImpl: async () => answer })
+  assert.equal((await decideAuto(runtime, { callId: 'h1', args: harmless })).outcome, 'allowed-once')
+  runtime.onResult({ callId: 'h1' }, clean())
+  assert.equal(log.lines.filter(l => l.event === 'allowlist-would-add').length, 1)
+  // The same command again: the list would allow it, but the model now asks, so the user decides.
+  answer = verdict('ask_user', 'medium')
+  assert.deepEqual(await decideAuto(runtime, { callId: 'h2', args: harmless, answer: 'rejected' }), { outcome: 'rejected', asked: true })
+  assert.equal(log.lines.filter(l => l.event === 'request')[1].allowlist.lookup, 'hit')
+  runtime.onResult({ callId: 'h2' }, rejected)
+  assert.equal(log.lines.filter(l => l.event === 'allowlist-would-remove').length, 1)
+  // Now blocked: it asks without the model, even though the model would allow.
+  answer = verdict('allow', 'low')
+  assert.deepEqual(await decideAuto(runtime, { callId: 'h3', args: harmless }), { outcome: 'allowed-once', asked: true })
+  assert.equal(log.lines.filter(l => l.event === 'outcome')[2].because, 'allowlist-blocked')
 })

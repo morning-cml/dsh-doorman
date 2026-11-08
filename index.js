@@ -1,11 +1,14 @@
 /**
  * dsh-doorman — triage of sandbox-escalation approval prompts.
  *
- * This build (stage 3a) runs the hard rules, the allowlist and the model
- * review in observe-only mode: every request still goes to the user, and the
- * log records what the plugin would have done next to what the user chose.
- * The allowlist only shadows: what it would add, hit or block is logged and
- * kept in memory, and allowlist.json is never written.
+ * This build (stage 3b) runs the hard rules, the allowlist and the model
+ * review. Observe mode (the default) sends every request to the user and logs
+ * what the plugin would have done next to what the user chose. Auto mode acts
+ * only on a verified, user-confirmed dsh version and only in sessions whose
+ * permission preset is the plugin's ("doorman"): it rejects what the hard rules
+ * or the model deny, allows once what the model allows (after a snapshot), and
+ * sends the rest to the user. The allowlist only shadows: what it would add,
+ * hit or block is logged and kept in memory, and allowlist.json is never written.
  * Nothing here may break dsh: every step is guarded, and if anything is
  * missing the plugin simply forwards approvals unchanged.
  */
@@ -19,10 +22,11 @@ import { VERIFIED_DSH_VERSIONS, detectDshVersion, findDshHome, installFacts, ins
 import { createHost } from './lib/host.js'
 import { createLog } from './lib/log.js'
 import { createRuntime } from './lib/runtime.js'
-import { buildConfigSchema, readSettings } from './lib/settings.js'
+import { AUTO_PRESET, buildConfigSchema, readSettings } from './lib/settings.js'
 import { readState, recordVersion, writeState } from './lib/state.js'
 import { createAllowlist } from './lib/store/allowlist.js'
 import { fingerprintOf, hashFileSync } from './lib/store/fingerprint.js'
+import { createSnapshots } from './lib/store/snapshots.js'
 
 export const name = 'dsh-doorman'
 
@@ -48,6 +52,8 @@ const SECRET_ENV = /KEY|PASSWORD|SECRET|TOKEN|CREDENTIAL|AUTH|COOKIE|SESSION/i
 /** Script files are read up to this size; longer ones are "too long" anyway. */
 const READ_LIMIT = 256 * 1024
 const SELF_TEST_DELAY_MS = 3000
+/** How far back to look for what started the current turn; a longer turn reads as 'unknown'. */
+const TURN_SCAN_LIMIT = 5000
 
 /**
  * The Host environment without secrets (dsh strips the same names from agent shells).
@@ -115,7 +121,60 @@ function sessionInfo(ctx, agent) {
     sandboxMode: policy?.mode,
     workspaceRoot: policy?.workspaceRoot,
     cwd: typeof cwd === 'string' ? cwd : (session.header?.cwd ?? policy?.workspaceRoot),
+    ...permissionPreset(ctx, session),
+    origin: typeof session.header?.origin === 'string' ? session.header.origin : undefined,
+    trigger: turnTrigger(session),
   }
+}
+
+/**
+ * The session's permission preset, and whether the plugin's own preset is configured at all.
+ * Undefined values when dsh has no preset service or it cannot answer.
+ * @param {any} ctx
+ * @param {any} session
+ */
+function permissionPreset(ctx, session) {
+  try {
+    const presets = ctx.get('permissionPresets')
+    if (presets === undefined || typeof presets.current !== 'function') return { preset: undefined, presetConfigured: undefined }
+    const current = presets.current(session)
+    let configured
+    try {
+      configured = Array.isArray(presets.names) ? presets.names.includes(AUTO_PRESET) : undefined
+    } catch {
+      configured = undefined
+    }
+    return { preset: typeof current === 'string' ? current : undefined, presetConfigured: configured }
+  } catch {
+    return { preset: undefined, presetConfigured: undefined }
+  }
+}
+
+/**
+ * What started the session's current turn: 'human' when a person wrote in it (a message sent from
+ * dsh's client carries its request id), 'schedule' when only a scheduled reminder did, 'other' for
+ * anything else (a finished background job, another agent), 'unknown' when the log cannot be read.
+ * @param {any} session
+ * @returns {'human' | 'schedule' | 'other' | 'unknown'}
+ */
+function turnTrigger(session) {
+  try {
+    if (typeof session.eventAt !== 'function') return 'unknown'
+    const end = Number(session.seq)
+    if (!Number.isSafeInteger(end)) return 'unknown'
+    let scheduled = false
+    for (let seq = end - 1; seq >= 0 && seq >= end - TURN_SCAN_LIMIT; seq -= 1) {
+      const event = session.eventAt(seq)
+      if (event?.type === 'turn/start') return scheduled ? 'schedule' : 'other'
+      if (event?.type !== 'user/message') continue
+      const source = event.data?.source
+      if (source?.kind === 'user' && typeof source.rpcId === 'string') return 'human'
+      if (source?.kind === 'schedule') scheduled = true
+    }
+  } catch {
+    // An unreadable log: unknown, which counts as someone watching.
+  }
+  return 'unknown'
 }
 
 /**
@@ -168,19 +227,23 @@ export function apply(ctx, config) {
       const hit = await credentials.resolve(keyName)
       return typeof hit?.value === 'string' && hit.value.trim() !== '' ? hit.value : undefined
     }
-    // Stage 3a: the allowlist only shadows (in memory, never written) until auto mode exists.
+    // The allowlist only shadows (in memory, never written): auto mode acts on the hard rules and the model alone.
     const allowlist = createAllowlist({ file: path.join(dataDir, 'allowlist.json'), pathKey: p => host.tools.key(p), shadow: true })
+    const snapshots = createSnapshots({ dir: path.join(dataDir, 'snapshots') })
     const runtime = createRuntime({
       host,
       getSettings,
       log,
       dshVersion,
+      dshVersionVerified,
       sessionInfo: agent => sessionInfo(ctx, agent),
       getKey,
       readText,
       osLabel: osLabel(),
       allowlist,
       fingerprint: input => fingerprintOf({ ...input, host, hashFile: hashFileSync, readText }),
+      snapshots,
+      autoAvailable: true,
     })
 
     let pluginVersion = null
@@ -203,6 +266,8 @@ export function apply(ctx, config) {
       mode: current.effective,
       configuredMode: current.configured,
       ...(current.note ? { modeNote: current.note } : {}),
+      // Auto mode further needs this permission preset in the session.
+      ...(current.effective === 'auto' ? { autoPreset: AUTO_PRESET } : {}),
       model: settings.model,
       baseUrl: settings.baseUrl,
       allowlist: allowlist.stats(),

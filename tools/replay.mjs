@@ -2,11 +2,14 @@
 // docs/refactor-plan.zh.md §4). Each logged in-scope request is decided again with a real host and a
 // simulated shadow allowlist; the logged model verdict, the user's choice and the result drive the
 // post-check. It prints the layers, why commands may not be listed, what the allowlist would have
-// added, hit and removed, every would-hit next to what the user really did, and whether any model
-// payload would contain the user's real home path.
+// added, hit and removed, every would-hit next to what the user really did, whether any model
+// payload would contain the user's real home path, and what auto mode would have answered next to
+// what the user answered (a would-allow the user rejected is a misallow; a would-reject the user
+// allowed is a needless refusal).
 //
 // Dependency hashes come from the files as they are on disk now, as if no bound file changed during
-// the logged period: the most permissive assumption, so hits are bounded from above.
+// the logged period: the most permissive assumption, so hits are bounded from above. Auto mode's
+// answers use the verdicts logged at the time, from the prompt of that time.
 //
 // Usage: node tools/replay.mjs [--since YYYY-MM-DD] [--logs <dir>]   (reads only; writes nothing)
 import fs from 'node:fs'
@@ -16,6 +19,7 @@ import { installedPluginSkillDirs, realProbe } from '../lib/dsh-env.js'
 import { decide } from '../lib/engine.js'
 import { createHost } from '../lib/host.js'
 import { buildPayload } from '../lib/model/payload.js'
+import { actionFor } from '../lib/model/verdict.js'
 import { detectInjection } from '../lib/rules/injection.js'
 import { postCheckProblems } from '../lib/runtime.js'
 import { createAllowlist } from '../lib/store/allowlist.js'
@@ -73,6 +77,8 @@ const count = (map, key) => map.set(key, (map.get(key) ?? 0) + 1)
 const layers = new Map()
 const reasons = new Map()
 const events = []
+const auto = new Map()
+const autoCases = []
 let inScope = 0
 let eligible = 0
 let leaked = 0
@@ -110,7 +116,20 @@ for (const r of lines.filter(l => l.event === 'request' && l.scope === 'ok')) {
 
   const problems = postCheckProblems({ outcome: g.outcome?.outcome, summary: g.result, workdirMatches: g.result?.workdirMatches })
   const brief = { ts: r.ts.slice(5, 16), command: (r.command ?? r.filePath ?? '').replace(/\s+/g, ' ').slice(0, 110), user: g.outcome?.outcome ?? '?', exit: g.result?.exitCode }
-  if (layer === 'allowlist-hit') {
+
+  // What auto mode would have answered (in a session with the plugin's preset): hard denies and
+  // model denies are rejected, model allows allowed once, the rest goes to the user.
+  let answer = 'ask'
+  if (layer === 'hard-deny') answer = 'reject'
+  else if (layer === 'model') answer = g.model === undefined ? 'no-verdict' : actionFor(g.model)
+  const user = g.outcome?.outcome === 'allowed-once' ? 'allowed' : g.outcome?.outcome === 'rejected' ? 'rejected' : 'other'
+  count(auto, `${answer} / user ${user}`)
+  if ((answer === 'allow-once' && user !== 'allowed') || (answer === 'reject' && user === 'allowed')) {
+    autoCases.push({ kind: answer === 'allow-once' ? 'MISALLOW' : 'NEEDLESS REJECT', layer, ...brief, why: g.model?.explanation ?? (decision.hard?.findings ?? []).map(f => f.rule).join(',') })
+  }
+
+  // A shadow hit goes on to the model; for the allowlist it is still a hit.
+  if (decision.allowlist?.status === 'hit' || layer === 'allowlist-hit') {
     if (problems.length === 0) sim.touch(fp)
     else sim.block(fp, problems)
     events.push({ kind: problems.length === 0 ? 'HIT' : 'HIT -> REMOVE', ...brief, problems })
@@ -145,3 +164,8 @@ for (const e of events) {
 const hits = events.filter(e => e.kind.startsWith('HIT'))
 console.log(`\nwould add: ${events.filter(e => e.kind === 'ADD').length}, would hit: ${hits.length}, would remove: ${events.filter(e => e.kind === 'HIT -> REMOVE').length}, blocked asks: ${events.filter(e => e.kind.startsWith('BLOCKED')).length}`)
 console.log(`would-hits the user did not allow (误放): ${hits.filter(e => e.user !== 'allowed-once').length}`)
+
+console.log('\nauto mode (verdicts as logged at the time) / what the user did:')
+for (const [key, n] of [...auto].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(4)}  ${key}`)
+console.log(`misallows (auto would allow, the user did not): ${autoCases.filter(c => c.kind === 'MISALLOW').length}; needless rejects (auto would reject, the user allowed): ${autoCases.filter(c => c.kind !== 'MISALLOW').length}`)
+for (const c of autoCases) console.log(`  ${c.kind.padEnd(16)} ${c.ts} layer=${c.layer} user=${c.user} ${JSON.stringify(c.command)}  (${String(c.why).slice(0, 90)})`)
