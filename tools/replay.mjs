@@ -5,7 +5,8 @@
 // added, hit and removed, every would-hit next to what the user really did, whether any model
 // payload would contain the user's real home path, and what auto mode would have answered next to
 // what the user answered (a would-allow the user rejected is a misallow; a would-reject the user
-// allowed is a needless refusal).
+// allowed is a needless refusal). Requests the plugin answered itself in auto mode carry no answer
+// of the user's: they are listed apart, for review, and never counted either way.
 //
 // Dependency hashes come from the files as they are on disk now, as if no bound file changed during
 // the logged period: the most permissive assumption, so hits are bounded from above. Auto mode's
@@ -79,6 +80,7 @@ const reasons = new Map()
 const events = []
 const auto = new Map()
 const autoCases = []
+const autoDecided = []
 let inScope = 0
 let eligible = 0
 let leaked = 0
@@ -122,9 +124,12 @@ for (const r of lines.filter(l => l.event === 'request' && l.scope === 'ok')) {
   let answer = 'ask'
   if (layer === 'hard-deny') answer = 'reject'
   else if (layer === 'model') answer = g.model === undefined ? 'no-verdict' : actionFor(g.model)
+  // In auto mode the plugin itself may have answered: then nobody knows what the user would have done.
+  const byPlugin = g.outcome?.decidedBy === 'doorman'
   const user = g.outcome?.outcome === 'allowed-once' ? 'allowed' : g.outcome?.outcome === 'rejected' ? 'rejected' : 'other'
-  count(auto, `${answer} / user ${user}`)
-  if ((answer === 'allow-once' && user !== 'allowed') || (answer === 'reject' && user === 'allowed')) {
+  count(auto, byPlugin ? `${answer} / plugin ${user} (user not asked)` : `${answer} / user ${user}`)
+  if (byPlugin) autoDecided.push({ answer, layer, ...brief, why: g.model?.explanation ?? (decision.hard?.findings ?? []).map(f => f.rule).join(',') })
+  else if ((answer === 'allow-once' && user !== 'allowed') || (answer === 'reject' && user === 'allowed')) {
     autoCases.push({ kind: answer === 'allow-once' ? 'MISALLOW' : 'NEEDLESS REJECT', layer, ...brief, why: g.model?.explanation ?? (decision.hard?.findings ?? []).map(f => f.rule).join(',') })
   }
 
@@ -168,4 +173,7 @@ console.log(`would-hits the user did not allow (误放): ${hits.filter(e => e.us
 console.log('\nauto mode (verdicts as logged at the time) / what the user did:')
 for (const [key, n] of [...auto].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(4)}  ${key}`)
 console.log(`misallows (auto would allow, the user did not): ${autoCases.filter(c => c.kind === 'MISALLOW').length}; needless rejects (auto would reject, the user allowed): ${autoCases.filter(c => c.kind !== 'MISALLOW').length}`)
+console.log('  (only requests the user answered; those the plugin answered itself are listed below for review)')
 for (const c of autoCases) console.log(`  ${c.kind.padEnd(16)} ${c.ts} layer=${c.layer} user=${c.user} ${JSON.stringify(c.command)}  (${String(c.why).slice(0, 90)})`)
+console.log(`\nanswered by the plugin in auto mode (the user was not asked): ${autoDecided.length}`)
+for (const c of autoDecided) console.log(`  ${c.answer.padEnd(10)} ${c.ts} layer=${c.layer} ${JSON.stringify(c.command)}  (${String(c.why).slice(0, 90)})`)
