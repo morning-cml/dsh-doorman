@@ -41,6 +41,7 @@ Turning auto mode on (both edits go in the profile's `cordis.patch.yml`, which t
         approval: ask
         name: 门卫自动审批
         description: 沙箱照旧；提权申请先由 dsh-doorman 判断，能确定的自动放行或拒绝，其余照常弹给你。
+    defaultPreset: doorman   # optional: new sessions start in doorman (keep it together with the preset above)
 - id: dsh-doorman
   name: dsh-doorman
   config:
@@ -48,9 +49,15 @@ Turning auto mode on (both edits go in the profile's `cordis.patch.yml`, which t
     autoModeConfirmedForVersion: 0.2.2-rc.1   # the running dsh version
 ```
 
-Then pick “门卫自动审批” in a session's permission menu. Without the plugin that preset behaves exactly like
-`workspace-write`. It has to be listed after `workspace-write`: unless a default preset is set, dsh gives new sessions
-the first preset that matches the default sandbox and approval policy.
+With `defaultPreset: doorman` (the same as choosing “门卫自动审批” under dsh Settings → General → Permission) every new
+session starts in that preset; to approve by hand in one session, switch that session to `workspace-write`. Existing
+sessions keep the preset recorded in their own history — switch each of them once in its permission menu (or type
+`/permission doorman`). dsh only applies the default when a session is created, and the plugin does not rewrite
+sessions' choices. Sessions on `danger-full-access` never ask for approval, so the plugin has nothing to judge there.
+Without the plugin the doorman preset behaves exactly like `workspace-write`. Without `defaultPreset` it has to be listed
+after `workspace-write`: dsh then gives new sessions the first preset that matches the default sandbox and approval
+policy. The setting cannot ship inside the plugin: a patch layer replaces a row's whole `config`, and the profile's own
+`permission` row, applied last, would override it.
 
 Running other installed plugins' skill scripts is treated like running dsh's own bundled tools; a plain `git push` to a
 configured remote is left to the model (force/mirror/delete/ad-hoc-URL pushes are handed to you).
