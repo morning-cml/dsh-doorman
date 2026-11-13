@@ -266,6 +266,11 @@ test('the result of an escalated call is logged against its request', async () =
   const result = log.lines.find(l => l.event === 'result')
   assert.equal(result.id, request.id)
   assert.equal(result.exitCode, 0)
+
+  await escalate(runtime, { callId: 'r2', args: harmless, answer: 'rejected' })
+  runtime.onResult({ callId: 'r2' }, { isError: true, error: { code: 'SANDBOX_ESCALATION_REJECTED', message: 'escalation rejected' }, content: [] })
+  const failure = log.lines.find(l => l.event === 'result' && l.callId === 'r2')
+  assert.deepEqual([failure.isError, failure.errorCode, failure.exitCode], [true, 'SANDBOX_ESCALATION_REJECTED', undefined])
 })
 
 test('the result says where the command really ran (dsh 0.2.1+) and whether the rules assumed the same place', async () => {
@@ -594,6 +599,25 @@ test('auto: a model deny is rejected; ask_user and every failure to get a verdic
   const exploding = autoRuntime({ reviewImpl: async () => { throw new Error('reviewer exploded') } })
   assert.deepEqual(await decideAuto(exploding.runtime, { args: harmless }), { outcome: 'allowed-once', asked: true })
   assert.equal(exploding.log.lines.find(l => l.event === 'model').status, 'error')
+})
+
+test('auto: scripts and binaries in additional writable roots need the same review as workspace code', async () => {
+  const root = 'D:\\data'
+  const script = `${root}\\audit.js`
+  const reviewer = countingReviewer(verdict('allow', 'low'))
+  const { runtime, log } = autoRuntime({
+    session: { ...DOORMAN, extraWritableRoots: [root] },
+    reviewImpl: reviewer.impl,
+    readText: file => file === script ? 'console.log("audit")' : undefined,
+  })
+  const args = { ...harmless, command: `node "${script}"` }
+  assert.equal((await decideAuto(runtime, { args })).asked, false)
+  assert.deepEqual(reviewer.calls[0].payload.scripts, [{ path: script, content: 'console.log("audit")' }])
+  assert.deepEqual(log.lines.find(l => l.event === 'request').extraWritableRoots, [root])
+
+  const binary = { ...args, command: `& "${root}\\audit.exe"` }
+  assert.equal((await decideAuto(runtime, { callId: 'binary', args: binary })).asked, true)
+  assert.equal(reviewer.calls.length, 1)
 })
 
 test('auto: a hard deny is rejected without asking the model; a hard ask goes to the user', async () => {

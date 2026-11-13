@@ -5,8 +5,8 @@
 // added, hit and removed, every would-hit next to what the user really did, whether any model
 // payload would contain the user's real home path, and what auto mode would have answered next to
 // what the user answered (a would-allow the user rejected is a misallow; a would-reject the user
-// allowed is a needless refusal). Requests the plugin answered itself in auto mode carry no answer
-// of the user's: they are listed apart, for review, and never counted either way.
+// allowed is a needless refusal). Only explicit user answers count. Requests the plugin answered
+// in auto mode are listed separately.
 //
 // Dependency hashes come from the files as they are on disk now, as if no bound file changed during
 // the logged period: the most permissive assumption, so hits are bounded from above. Auto mode's
@@ -58,13 +58,32 @@ const readText = (file) => {
   }
 }
 
-const lines = fs.readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()
-  .flatMap(f => fs.readFileSync(path.join(logDir, f), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)))
-  .filter(l => l.ts >= since)
+let malformed = 0
+const lines = fs.readdirSync(logDir, { withFileTypes: true })
+  .filter(f => f.isFile() && f.name.endsWith('.jsonl'))
+  .flatMap(f => {
+    const events = []
+    for (const line of fs.readFileSync(path.join(logDir, f.name), 'utf8').split('\n')) {
+      if (line.trim() === '') continue
+      try {
+        const event = JSON.parse(line)
+        if (typeof event?.ts === 'string' && typeof event.event === 'string') {
+          events.push(event)
+          continue
+        }
+      } catch {
+        // A partial append can leave a malformed line.
+      }
+      malformed += 1
+    }
+    return events
+  })
+  .sort((a, b) => a.ts.localeCompare(b.ts))
+if (malformed > 0) console.error(`skipped ${malformed} malformed log lines`)
 const byId = new Map()
 for (const l of lines) {
-  if (l.id === undefined) continue
-  if (!byId.has(l.id)) byId.set(l.id, {})
+  if (typeof l.id !== 'string') continue
+  if (!byId.has(l.id)) byId.set(l.id, Object.create(null))
   byId.get(l.id)[l.event] = l
 }
 
@@ -85,29 +104,27 @@ let inScope = 0
 let eligible = 0
 let leaked = 0
 
-for (const r of lines.filter(l => l.event === 'request' && l.scope === 'ok')) {
+for (const r of lines.filter(l => l.event === 'request' && l.scope === 'ok' && l.ts >= since)) {
   inScope += 1
-  const g = byId.get(r.id)
+  const g = byId.get(r.id) ?? {}
   const shell = r.tool === 'pwsh' || r.tool === 'bash'
   const args = shell
     ? { command: r.command, ...(r.workdirArg !== undefined ? { workdir: r.workdirArg } : {}), sandbox_permissions: 'danger-full-access', justification: r.justification }
-    : { file_path: r.filePath, content: r.contentHead ?? '', old_string: r.oldHead, new_string: r.newHead, sandbox_permissions: 'danger-full-access', justification: r.justification }
+    : { file_path: r.filePath, content: r.contentHead ?? '', old_string: r.oldHead, new_string: r.newHead, replace_all: r.replaceAll, sandbox_permissions: 'danger-full-access', justification: r.justification }
   const decision = decide({
     toolName: r.tool,
     reason: `escalate sandbox to danger-full-access: ${r.justification}`,
     record: { name: r.tool, args, nested: false },
-    session: { sessionId: r.sessionId, sandboxMode: 'workspace-write', workspaceRoot: r.workspaceRoot, cwd: r.cwd },
+    session: { sandboxMode: 'workspace-write', workspaceRoot: r.workspaceRoot, cwd: r.cwd, extraWritableRoots: r.extraWritableRoots },
     host,
     allowlist: sim,
     fingerprint,
   })
   let layer = decision.layer
   if (layer === 'hard-pass') {
-    const built = buildPayload({ tool: r.tool, args, facts: decision.hard.facts, host, workspaceRoot: r.workspaceRoot, os: 'replay', readText })
+    const built = buildPayload({ tool: r.tool, args, facts: decision.hard.facts, previousFailure: r.previousFailure, host, workspaceRoot: r.workspaceRoot, os: 'replay', readText })
     if (built.ok && userPath.test(JSON.stringify(built.payload))) leaked += 1
-    // A script deleted since cannot be read today; if the request reached the model back then, it could be.
-    if (r.layer === 'model' && g.model !== undefined) layer = 'model'
-    else if (!built.ok) layer = 'model-input'
+    if (!built.ok) layer = 'model-input'
     else if (detectInjection(...built.texts) !== null) layer = 'hard-ask'
     else layer = 'model'
   }
@@ -116,8 +133,11 @@ for (const r of lines.filter(l => l.event === 'request' && l.scope === 'ok')) {
   if (fp?.eligible) eligible += 1
   else for (const reason of fp?.reasons ?? []) count(reasons, reason.replace(/(?:[A-Za-z]:\\|\\\\)[^\s，）]*/g, '<path>').slice(0, 70))
 
-  const problems = postCheckProblems({ outcome: g.outcome?.outcome, summary: g.result, workdirMatches: g.result?.workdirMatches })
-  const brief = { ts: r.ts.slice(5, 16), command: (r.command ?? r.filePath ?? '').replace(/\s+/g, ' ').slice(0, 110), user: g.outcome?.outcome ?? '?', exit: g.result?.exitCode }
+  const outcome = g.outcome?.outcome
+  const problems = postCheckProblems({ outcome, summary: g.result, workdirMatches: g.result?.workdirMatches, outsideChanges: g.result?.outsideChanges })
+  const byPlugin = g.outcome?.decidedBy === 'doorman'
+  const user = !byPlugin && (outcome === 'allowed-once' || outcome === 'rejected') ? outcome : undefined
+  const brief = { ts: r.ts.slice(5, 16), command: (r.command ?? r.filePath ?? '').replace(/\s+/g, ' ').slice(0, 110), user: user ?? '?', exit: g.result?.exitCode }
 
   // What auto mode would have answered (in a session with the plugin's preset): hard denies and
   // model denies are rejected, model allows allowed once, the rest goes to the user.
@@ -125,11 +145,10 @@ for (const r of lines.filter(l => l.event === 'request' && l.scope === 'ok')) {
   if (layer === 'hard-deny') answer = 'reject'
   else if (layer === 'model') answer = g.model === undefined ? 'no-verdict' : actionFor(g.model)
   // In auto mode the plugin itself may have answered: then nobody knows what the user would have done.
-  const byPlugin = g.outcome?.decidedBy === 'doorman'
-  const user = g.outcome?.outcome === 'allowed-once' ? 'allowed' : g.outcome?.outcome === 'rejected' ? 'rejected' : 'other'
-  count(auto, byPlugin ? `${answer} / plugin ${user} (user not asked)` : `${answer} / user ${user}`)
-  if (byPlugin) autoDecided.push({ answer, layer, ...brief, why: g.model?.explanation ?? (decision.hard?.findings ?? []).map(f => f.rule).join(',') })
-  else if ((answer === 'allow-once' && user !== 'allowed') || (answer === 'reject' && user === 'allowed')) {
+  const observed = byPlugin ? `plugin ${outcome ?? 'unknown'}` : user ? `user ${user}` : 'no user decision recorded'
+  count(auto, `${answer} / ${observed}`)
+  if (byPlugin) autoDecided.push({ answer, outcome, layer, ...brief, why: g.model?.explanation ?? (decision.hard?.findings ?? []).map(f => f.rule).join(',') })
+  else if ((answer === 'allow-once' && user === 'rejected') || (answer === 'reject' && user === 'allowed-once')) {
     autoCases.push({ kind: answer === 'allow-once' ? 'MISALLOW' : 'NEEDLESS REJECT', layer, ...brief, why: g.model?.explanation ?? (decision.hard?.findings ?? []).map(f => f.rule).join(',') })
   }
 
@@ -168,12 +187,12 @@ for (const e of events) {
 }
 const hits = events.filter(e => e.kind.startsWith('HIT'))
 console.log(`\nwould add: ${events.filter(e => e.kind === 'ADD').length}, would hit: ${hits.length}, would remove: ${events.filter(e => e.kind === 'HIT -> REMOVE').length}, blocked asks: ${events.filter(e => e.kind.startsWith('BLOCKED')).length}`)
-console.log(`would-hits the user did not allow (误放): ${hits.filter(e => e.user !== 'allowed-once').length}`)
+console.log(`would-hits the user explicitly rejected (误放): ${hits.filter(e => e.user === 'rejected').length}`)
 
 console.log('\nauto mode (verdicts as logged at the time) / what the user did:')
 for (const [key, n] of [...auto].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(4)}  ${key}`)
-console.log(`misallows (auto would allow, the user did not): ${autoCases.filter(c => c.kind === 'MISALLOW').length}; needless rejects (auto would reject, the user allowed): ${autoCases.filter(c => c.kind !== 'MISALLOW').length}`)
+console.log(`misallows (auto would allow, the user rejected): ${autoCases.filter(c => c.kind === 'MISALLOW').length}; needless rejects (auto would reject, the user allowed): ${autoCases.filter(c => c.kind !== 'MISALLOW').length}`)
 console.log('  (only requests the user answered; those the plugin answered itself are listed below for review)')
 for (const c of autoCases) console.log(`  ${c.kind.padEnd(16)} ${c.ts} layer=${c.layer} user=${c.user} ${JSON.stringify(c.command)}  (${String(c.why).slice(0, 90)})`)
 console.log(`\nanswered by the plugin in auto mode (the user was not asked): ${autoDecided.length}`)
-for (const c of autoDecided) console.log(`  ${c.answer.padEnd(10)} ${c.ts} layer=${c.layer} ${JSON.stringify(c.command)}  (${String(c.why).slice(0, 90)})`)
+for (const c of autoDecided) console.log(`  ${c.answer.padEnd(10)} ${c.ts} layer=${c.layer} outcome=${c.outcome ?? '?'} ${JSON.stringify(c.command)}  (${String(c.why).slice(0, 90)})`)

@@ -17,7 +17,7 @@ goes to the user — except in a turn nobody is watching (a scheduled reminder),
 The allowlist only shadows: entries are fingerprinted (exact command, place and the hashes of the files it depends on) and
 what would be added, hit or blocked is logged, but it never allows anything and `allowlist.json` is never written.
 It loads on dsh 0.2.x (`engines.dsh`: `>=0.2.0-rc.2 <0.3.0-0`) and was checked against the dsh 0.2.0-rc.2,
-0.2.1-rc.1 … rc.5 and 0.2.2-rc.1 sources. On 0.2.2 the new `apply_patch` file tool (off in dsh's shipped bundles) is not
+0.2.1-rc.1 … rc.5 and 0.2.2-rc.1 … rc.2 sources. On 0.2.2 the `apply_patch` file tool is not
 judged: its escalations reach the user unchanged.
 
 Turning auto mode on (both edits go in the profile's `cordis.patch.yml`, which the agent cannot change; restart dsh after):
@@ -46,7 +46,7 @@ Turning auto mode on (both edits go in the profile's `cordis.patch.yml`, which t
   name: dsh-doorman
   config:
     mode: auto
-    autoModeConfirmedForVersion: 0.2.2-rc.1   # the running dsh version
+    autoModeConfirmedForVersion: 0.2.2-rc.2   # the running dsh version
 ```
 
 With `defaultPreset: doorman` (the same as choosing “门卫自动审批” under dsh Settings → General → Permission) every new

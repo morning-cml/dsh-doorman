@@ -671,7 +671,7 @@ test('facts: a hashtable\'s values are code, its keys are not; a bare list is a 
   assert.deepEqual([list.facts.runs, list.facts.commands], [[], []])
   // What runs and cannot be told is recorded, so the reviewer is never asked to judge it blind.
   assert.deepEqual(pwsh('& $tool --install').facts.unknownRuns.length, 1)
-  assert.deepEqual(pwsh('node -r ts-node/register $script').facts.unknownRuns.length, 1)
+  assert.equal(pwsh('node -r ts-node/register $script').facts.unknownRuns.length, 2)
   assert.deepEqual(pwsh('python -m pytest $x').facts.unknownRuns, [])
 })
 

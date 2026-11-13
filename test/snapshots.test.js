@@ -141,7 +141,7 @@ test('what is captured: the file tools\' target; a command\'s outside files and 
 const session = { sessionId: 's1', sandboxMode: 'workspace-write', workspaceRoot: ws, cwd: ws, preset: 'doorman', presetConfigured: true, trigger: 'human' }
 const agent = { id: 'a1', session: { header: { id: 's1', cwd: ws } } }
 
-function autoRuntime({ snapshots, verdict = { status: 'ok', decision: 'allow', risk: 'low', explanation: 'x' } } = {}) {
+function autoRuntime({ snapshots, trigger = 'human', verdict = { status: 'ok', decision: 'allow', risk: 'low', explanation: 'x' } } = {}) {
   const lines = []
   const runtime = createRuntime({
     host,
@@ -150,7 +150,7 @@ function autoRuntime({ snapshots, verdict = { status: 'ok', decision: 'allow', r
     dshVersion: '0.2.1-rc.5',
     dshVersionVerified: true,
     autoAvailable: true,
-    sessionInfo: () => session,
+    sessionInfo: () => ({ ...session, trigger }),
     getKey: async () => 'sk-test',
     readText: () => undefined,
     osLabel: 'test',
@@ -193,6 +193,9 @@ test('auto: when the snapshot cannot be written, the call goes to the user inste
   assert.deepEqual({ outcome, asked }, { outcome: 'allowed-once', asked: true })
   assert.deepEqual([lines.find(l => l.event === 'outcome').decidedBy, lines.find(l => l.event === 'outcome').because], ['user', 'error'])
   assert.ok(lines.some(l => l.event === 'error' && /disk full/.test(l.message)))
+  const scheduled = autoRuntime({ snapshots: broken, trigger: 'schedule' })
+  const args = { file_path: target, content: 'x', sandbox_permissions: 'danger-full-access', justification: 'edit' }
+  assert.deepEqual(await escalate(scheduled.runtime, { callId: 'scheduled', tool: 'write', args }), { outcome: 'rejected', asked: false })
   // A file too big to keep is still allowed, and marked as not diffable.
   const big = write(path.join(outside, 'big.log'), 'y'.repeat(LIMITS.fileBytes + 10))
   const store = createSnapshots({ dir: path.join(base, 'run-snapshots-big') })

@@ -197,6 +197,7 @@ test('payload: scripts the command runs are included; unreadable, binary or over
   assert.equal(shellPayload('& .\\scripts\\build.ps1').ok, false)
   assert.equal(shellPayload('& .\\scripts\\build.ps1', { readText: () => 'x'.repeat(8001) }).ok, false)
   assert.equal(shellPayload('.\\bin\\tool.exe --install').ok, false)
+  assert.equal(shellPayload('.\\bin\\tool --install').ok, false)
   assert.equal(shellPayload(`echo ${'x'.repeat(8100)}`).ok, false)
   // A script run twice is sent once; a file run through iex is sent whatever its extension.
   const twice = shellPayload(`& ${script}; & ${script} -Release`, { readText: f => (f === script ? 'x' : undefined) })
@@ -220,6 +221,27 @@ test('payload: npm scripts come from package.json', () => {
   const install = shellPayload('npm install')
   assert.equal(install.ok, true)
   assert.match(install.payload.scripts[0].package_scripts.note, /package\.json/)
+})
+
+test('payload: Node and Python review the entry point, including files without script extensions', () => {
+  const command = 'node .\\build\\runner payload.js; python .\\build\\runner.dat'
+  const files = []
+  const built = shellPayload(command, { readText: file => { files.push(file); return 'code' } })
+  assert.equal(built.ok, true)
+  assert.deepEqual(files, [`${WS}\\build\\runner`, `${WS}\\build\\runner.dat`])
+  assert.equal(shellPayload('node -e "payload.js"').ok, true)
+
+  for (const command of [
+    'node --require .\\build\\preload.cjs .\\build\\app.js',
+    'node --import=./preload.mjs ./app.js',
+    'node --env-file .env ./app.js',
+    'node --env-file-if-exists .env ./app.js',
+    'python -',
+    'Start-Process -FilePath $program',
+  ]) assert.equal(shellPayload(command, { readText: () => 'code' }).ok, false, command)
+  assert.equal(shellPayload('python .\\build\\runner.dat', { readText: () => 'data\u0000' }).ok, false)
+  const args = { command: "Set-Content .\\build\\runner 'new script'; node .\\build\\runner" }
+  assert.ok(evaluateHardRules({ tool: 'pwsh', args, host, workspaceRoot: WS, cwd: WS }).findings.some(f => f.rule === 'ask.write-then-run'))
 })
 
 test('payload: package scripts come from the project the command moved into', () => {
